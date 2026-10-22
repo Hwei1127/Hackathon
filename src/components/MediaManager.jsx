@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Icon from "./Icon.jsx";
 import Vehicle360, { useLocalMedia } from "./Vehicle360.jsx";
 import { BODY_TYPES, bodyTypeOf, expandFrames, fmtBytes, guessModelFamily, setLocalMedia, sortFiles } from "../lib/vehicleMedia.js";
@@ -29,31 +29,133 @@ function DropZone({ accept, multiple, onFiles, icon, title, hint }) {
   );
 }
 
+/* Validates and shrinks dropped photos → File[] in play order, or null (after telling the user why). */
+export async function preparePhotos(files, toast, setBusy) {
+  const imgs = sortFiles(files.filter((f) => f.type.startsWith("image/")));
+  if (!imgs.length) { toast("Choose image files (JPG, PNG or WebP)."); return null; }
+  if (imgs.length > 72) { toast("Use 72 photos or fewer."); return null; }
+  setBusy(`Optimising ${imgs.length} photos…`);
+  const frames = [];
+  try { for (const f of imgs) frames.push(await shrink(f)); } finally { setBusy(""); }
+  return frames;
+}
+export function pickGlb(files, toast) {
+  const f = files.find((x) => /\.glb$/i.test(x.name));
+  if (!f) toast("Choose a .glb 3D file (binary glTF).");
+  return f || null;
+}
+
+/* Upload, hosted-link and render fields — shared by the 360° media window and the Add / Edit vehicle form.
+   info: { frames, framesSize, glbName, glbSize } describing what is currently attached. */
+export function MediaFields({ id, model, info, form, set, onPhotos, onModel, onRemovePhotos, onRemoveModel, settings, goSettings, guess, withBody = true }) {
+  const hostedCount = expandFrames(form.framesUrl).length;
+  const ph = id || "<Stock ID>";
+  return (
+    <>
+      <div className="media-sec">
+        <div className="media-h"><Icon n="image" s={15} /><b>360° photos</b>
+          {info.frames > 0 && <span className="pill g">{info.frames} photos · {fmtBytes(info.framesSize)}</span>}</div>
+        <DropZone accept="image/*" multiple onFiles={onPhotos} icon="upload" title="Upload or drop photos"
+          hint="12–36 shots taken at even steps around the car. They play in file-name order (01.jpg, 02.jpg…)." />
+        {info.frames > 0 && <button type="button" className="mini-btn danger" onClick={onRemovePhotos}><Icon n="trash" s={12} />Remove photos</button>}
+      </div>
+
+      <div className="media-sec">
+        <div className="media-h"><Icon n="cube" s={15} /><b>3D model</b>
+          {info.glbName && <span className="pill g">{info.glbName} · {fmtBytes(info.glbSize)}</span>}</div>
+        <DropZone accept=".glb,model/gltf-binary" onFiles={onModel} icon="upload" title="Upload or drop a .glb file"
+          hint="Full 3D orbit with zoom, and AR on supported phones. Use a model you're licensed to use." />
+        {info.glbName && <button type="button" className="mini-btn danger" onClick={onRemoveModel}><Icon n="trash" s={12} />Remove 3D model</button>}
+      </div>
+      <p className="page-note" style={{ marginTop: -4 }}>Uploads are stored in this browser only. To share them with every user, host the files and link them below.</p>
+
+      <div className="media-sec">
+        <div className="media-h"><Icon n="link" s={15} /><b>Hosted files</b><span className="muted" style={{ fontSize: 10 }}>visible to everyone</span></div>
+        <div className="form-grid">
+          <div className="field full"><label>3D model URL (.glb)</label><input value={form.glbUrl} onChange={set("glbUrl")} placeholder={`/media/${ph}/model.glb`} /></div>
+          <div className="field full"><label>360° photo URLs {hostedCount > 0 && <span className="muted">· {hostedCount} frames</span>}</label>
+            <textarea value={form.framesUrl} onChange={set("framesUrl")} placeholder={`/media/${ph}/{01..36}.jpg\n(or one URL per line)`} /></div>
+        </div>
+      </div>
+
+      <div className="media-sec">
+        <div className="media-h"><Icon n="key" s={15} /><b>{withBody ? <>Studio renders &amp; illustration</> : "Studio renders"}</b>
+          <span className={`pill ${settings.imaginKey ? "g" : "n"}`}>{settings.imaginKey ? "IMAGIN connected" : "No render key"}</span></div>
+        <div className="form-grid">
+          <div className="field"><label>Model family for renders</label><input value={form.imaginModel} onChange={set("imaginModel")} placeholder={`auto: ${guess || "—"}`} /></div>
+          {withBody && <div className="field"><label>Body type</label><select value={form.body} onChange={set("body")}>{BODY_TYPES.map((b) => <option key={b} value={b}>{b === "Auto" ? `Auto (${bodyTypeOf({ model })})` : b}</option>)}</select></div>}
+        </div>
+        {!settings.imaginKey && <p className="page-note" style={{ margin: "10px 0 0" }}>Add your IMAGIN.studio customer key under {goSettings ? <button type="button" className="link-btn" onClick={goSettings}>Administration → Vehicle imagery</button> : <b>Administration → Vehicle imagery</b>} to show photo-realistic renders of every model automatically.</p>}
+      </div>
+    </>
+  );
+}
+
+/* 360° / 3D section of the Add / Edit vehicle form. Uploads wait in `value.pending` until the record is saved:
+   { frames?: File[], glb?: File|null } — a missing key keeps what is stored, an empty value removes it. */
+export function VehicleMediaForm({ vehicle, storedId, value, onChange, settings, toast }) {
+  const stored = useLocalMedia(storedId ?? "");
+  const [busy, setBusy] = useState("");
+  const [urls, setUrls] = useState({});
+  const { pending, form } = value;
+  useEffect(() => {
+    const frames = pending.frames?.map((f) => URL.createObjectURL(f));
+    const glb = pending.glb ? URL.createObjectURL(pending.glb) : pending.glb;
+    setUrls("glb" in pending ? { frames, glb } : { frames });
+    return () => { frames?.forEach(URL.revokeObjectURL); glb && URL.revokeObjectURL(glb); };
+  }, [pending.frames, pending.glb]);
+
+  const setPending = (patch) => onChange({ ...value, pending: { ...pending, ...patch } });
+  const set = (k) => (e) => onChange({ ...value, form: { ...form, [k]: e.target.value } });
+  const frames = pending.frames ? urls.frames || [] : stored.frames;
+  const glb = "glb" in pending ? urls.glb ?? null : stored.glb;
+  const info = pending.frames
+    ? { frames: pending.frames.length, framesSize: pending.frames.reduce((a, b) => a + b.size, 0) }
+    : { frames: stored.frames.length, framesSize: stored.framesSize };
+  if (pending.glb) Object.assign(info, { glbName: pending.glb.name, glbSize: pending.glb.size });
+  else if (!("glb" in pending) && stored.glb) Object.assign(info, { glbName: stored.glbName || "model.glb", glbSize: stored.glbSize });
+
+  const addPhotos = async (files) => {
+    const f = await preparePhotos(files, toast, setBusy).catch(() => null);
+    if (!f) return;
+    setPending({ frames: f });
+    if (f.length < 8) toast("Use 12 or more photos for a smooth spin.");
+  };
+  const addModel = (files) => { const f = pickGlb(files, toast); if (f) setPending({ glb: f }); };
+
+  return (
+    <div className="vm-form">
+      <div className="media-h"><Icon n="spin" s={15} /><b>360° view &amp; 3D model</b><span className="muted" style={{ fontSize: 10 }}>optional · saved with the record</span>
+        {busy && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>{busy}</span>}</div>
+      <div className="v-detail">
+        <Vehicle360 key={frames.length + (frames[0] || "") + (glb || "")} vehicle={{ ...vehicle, ...form }} media={{ frames, glb }} settings={settings} variant="detail" />
+      </div>
+      <MediaFields id={vehicle.id} model={vehicle.model} info={info} form={form} set={set} settings={settings} withBody={false}
+        guess={guessModelFamily(vehicle.brand, vehicle.model)} onPhotos={addPhotos} onModel={addModel}
+        onRemovePhotos={() => setPending({ frames: [] })} onRemoveModel={() => setPending({ glb: null })} />
+    </div>
+  );
+}
+
 export default function MediaManager({ vehicle: v, settings, onSave, onClose, toast, goSettings }) {
   const local = useLocalMedia(v.id);
   const [busy, setBusy] = useState("");
   const [form, setForm] = useState({ glbUrl: v.glbUrl || "", framesUrl: v.framesUrl || "", imaginModel: v.imaginModel || "", body: v.body || "Auto" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const preview = { ...v, ...form };
-  const guess = guessModelFamily(v.brand, v.model);
-  const hostedCount = expandFrames(form.framesUrl).length;
+  const info = { frames: local.frames.length, framesSize: local.framesSize, ...(local.glb ? { glbName: local.glbName || "model.glb", glbSize: local.glbSize } : {}) };
 
   const addPhotos = async (files) => {
-    const imgs = sortFiles(files.filter((f) => f.type.startsWith("image/")));
-    if (!imgs.length) return toast("Choose image files (JPG, PNG or WebP).");
-    if (imgs.length > 72) return toast("Use 72 photos or fewer.");
-    setBusy(`Optimising ${imgs.length} photos…`);
     try {
-      const frames = [];
-      for (const f of imgs) frames.push(await shrink(f));
+      const frames = await preparePhotos(files, toast, setBusy);
+      if (!frames) return;
       await setLocalMedia(v.id, { frames });
       toast(`${frames.length} photos saved for ${v.id}.${frames.length < 8 ? " Use 12 or more for a smooth spin." : ""}`);
     } catch { toast("Couldn't save the photos in this browser (storage may be full)."); }
-    setBusy("");
   };
   const addModel = async (files) => {
-    const f = files.find((x) => /\.glb$/i.test(x.name));
-    if (!f) return toast("Choose a .glb 3D file (binary glTF).");
+    const f = pickGlb(files, toast);
+    if (!f) return;
     setBusy("Saving 3D model…");
     try { await setLocalMedia(v.id, { glb: f }); toast(`3D model saved for ${v.id}.`); }
     catch { toast("Couldn't save the 3D file in this browser (storage may be full)."); }
@@ -67,42 +169,10 @@ export default function MediaManager({ vehicle: v, settings, onSave, onClose, to
         <p className="page-note" style={{ margin: "10px 0 16px" }}>
           The viewer uses the best source available: <b>3D model</b> → <b>360° photos</b> → <b>studio renders</b> → <b>illustration</b>.
         </p>
-
-        <div className="media-sec">
-          <div className="media-h"><Icon n="image" s={15} /><b>360° photos</b>
-            {local.frames.length > 0 && <span className="pill g">{local.frames.length} photos · {fmtBytes(local.framesSize)}</span>}</div>
-          <DropZone accept="image/*" multiple onFiles={addPhotos} icon="upload" title="Upload or drop photos"
-            hint="12–36 shots taken at even steps around the car. They play in file-name order (01.jpg, 02.jpg…)." />
-          {local.frames.length > 0 && <button className="mini-btn danger" onClick={() => setLocalMedia(v.id, { frames: [] }).then(() => toast("Photos removed."))}><Icon n="trash" s={12} />Remove photos</button>}
-        </div>
-
-        <div className="media-sec">
-          <div className="media-h"><Icon n="cube" s={15} /><b>3D model</b>
-            {local.glb && <span className="pill g">{local.glbName || "model.glb"} · {fmtBytes(local.glbSize)}</span>}</div>
-          <DropZone accept=".glb,model/gltf-binary" onFiles={addModel} icon="upload" title="Upload or drop a .glb file"
-            hint="Full 3D orbit with zoom, and AR on supported phones. Use a model you're licensed to use." />
-          {local.glb && <button className="mini-btn danger" onClick={() => setLocalMedia(v.id, { glb: null }).then(() => toast("3D model removed."))}><Icon n="trash" s={12} />Remove 3D model</button>}
-        </div>
-        <p className="page-note" style={{ marginTop: -4 }}>Uploads are stored in this browser only. To share them with every user, host the files and link them below.</p>
-
-        <div className="media-sec">
-          <div className="media-h"><Icon n="link" s={15} /><b>Hosted files</b><span className="muted" style={{ fontSize: 10 }}>visible to everyone</span></div>
-          <div className="form-grid">
-            <div className="field full"><label>3D model URL (.glb)</label><input value={form.glbUrl} onChange={set("glbUrl")} placeholder={`/media/${v.id}/model.glb`} /></div>
-            <div className="field full"><label>360° photo URLs {hostedCount > 0 && <span className="muted">· {hostedCount} frames</span>}</label>
-              <textarea value={form.framesUrl} onChange={set("framesUrl")} placeholder={`/media/${v.id}/{01..36}.jpg\n(or one URL per line)`} /></div>
-          </div>
-        </div>
-
-        <div className="media-sec">
-          <div className="media-h"><Icon n="key" s={15} /><b>Studio renders &amp; illustration</b>
-            <span className={`pill ${settings.imaginKey ? "g" : "n"}`}>{settings.imaginKey ? "IMAGIN connected" : "No render key"}</span></div>
-          <div className="form-grid">
-            <div className="field"><label>Model family for renders</label><input value={form.imaginModel} onChange={set("imaginModel")} placeholder={`auto: ${guess || "—"}`} /></div>
-            <div className="field"><label>Body type</label><select value={form.body} onChange={set("body")}>{BODY_TYPES.map((b) => <option key={b} value={b}>{b === "Auto" ? `Auto (${bodyTypeOf({ model: v.model })})` : b}</option>)}</select></div>
-          </div>
-          {!settings.imaginKey && <p className="page-note" style={{ margin: "10px 0 0" }}>Add your IMAGIN.studio customer key under <button className="link-btn" onClick={goSettings}>Administration → Vehicle imagery</button> to show photo-realistic renders of every model automatically.</p>}
-        </div>
+        <MediaFields id={v.id} model={v.model} info={info} form={form} set={set} settings={settings} goSettings={goSettings}
+          guess={guessModelFamily(v.brand, v.model)} onPhotos={addPhotos} onModel={addModel}
+          onRemovePhotos={() => setLocalMedia(v.id, { frames: [] }).then(() => toast("Photos removed."))}
+          onRemoveModel={() => setLocalMedia(v.id, { glb: null }).then(() => toast("3D model removed."))} />
       </div>
       <div className="modal-foot">
         {busy && <span className="muted" style={{ marginRight: "auto", fontSize: 12 }}>{busy}</span>}

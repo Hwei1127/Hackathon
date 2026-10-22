@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import Icon, { Logo } from "./components/Icon.jsx";
 import Vehicle360 from "./components/Vehicle360.jsx";
-import MediaManager from "./components/MediaManager.jsx";
+import MediaManager, { VehicleMediaForm } from "./components/MediaManager.jsx";
 import AiIdentify from "./components/AiIdentify.jsx";
-import { BODY_TYPES, loadSettings, saveSettings, clearAllLocalMedia } from "./lib/vehicleMedia.js";
+import DamageInspector from "./components/DamageInspector.jsx";
+import { damageSummary, damagedParts } from "./lib/damage.js";
+import { BODY_TYPES, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
 
 /* ───────────────────────── Data ───────────────────────── */
 const KEY = "autocore-db-v1";
@@ -82,6 +84,14 @@ const CONFIG = {
     fields: [["id", "Warranty ID", "text", true], ["customer", "Customer", "text", true], ["vehicle", "Vehicle", "text", true], ["start", "Warranty Start", "date", true], ["expiry", "Warranty Expiry", "date", true], ["coverage", "Coverage Details", "text", true], ["status", "Status", "select", ["Active", "Expiring Soon", "Claim Submitted", "Approved", "Rejected", "Expired"]]] },
 };
 const pageForKey = (k) => Object.keys(CONFIG).find((p) => CONFIG[p].key === k);
+// repair orders name their vehicle as "Brand Model" (or a stock ID); damage is kept on that vehicle when it's in stock
+const vehicleForJob = (db, job) => db.vehicles.find((x) => `${x.brand} ${x.model}` === job.vehicle || x.id === job.vehicle);
+const damageOwner = (db, key, id) => {
+  const rec = db[key]?.find((x) => x.id === id);
+  if (!rec) return null;
+  const veh = key === "jobs" ? vehicleForJob(db, rec) : rec;
+  return veh ? { key: "vehicles", rec: veh, shape: veh } : { key, rec, shape: { id: rec.id, brand: "", model: rec.vehicle || "", color: "" } };
+};
 
 /* ───────────────────────── Helpers ───────────────────────── */
 const money = (n) => "RM " + Number(n || 0).toLocaleString("en-MY", { maximumFractionDigits: 0 });
@@ -184,6 +194,7 @@ function DataTable({ rows, cols, type, onAction, compact }) {
                 <button className="mini-btn" onClick={() => onAction("view", type, r.id)}>View</button>
                 <button className="mini-btn" onClick={() => onAction("edit", type, r.id)}>Edit</button>
                 {type === "vehicles" && <button className="mini-btn" onClick={() => onAction("media", type, r.id)}><Icon n="spin" s={11} />360°</button>}
+                {(type === "vehicles" || type === "jobs") && <button className="mini-btn" onClick={() => onAction("damage", type, r.id)}><Icon n="alert" s={11} />Damage</button>}
               </div></td>}
             </tr>
           ))}
@@ -194,14 +205,20 @@ function DataTable({ rows, cols, type, onAction, compact }) {
 }
 
 /* ───────────────────────── Record form / view modal ───────────────────────── */
-function RecordForm({ cfg, type, record, onSave, onCancel }) {
+function RecordForm({ cfg, type, record, onSave, onCancel, settings, toast }) {
   const [vals, setVals] = useState(() => Object.fromEntries(cfg.fields.map(([k]) => [k, record?.[k] ?? defaultFor(k, type)])));
+  const [media, setMedia] = useState(() => ({ pending: {}, form: { glbUrl: record?.glbUrl || "", framesUrl: record?.framesUrl || "", imaginModel: record?.imaginModel || "" } }));
+  const [damage, setDamage] = useState(() => record?.damage || null);
+  const [damageOpen, setDamageOpen] = useState(() => damagedParts(record?.damage).length > 0);
   const set = (k, v) => setVals((p) => ({ ...p, [k]: v }));
   const submit = (e) => {
     e.preventDefault();
     const data = { ...vals };
     cfg.fields.forEach(([k, , kind]) => { if (kind === "number") data[k] = Number(data[k]); });
-    onSave(data);
+    if (type !== "inventory") return onSave(data);
+    Object.entries(media.form).forEach(([k, v]) => { data[k] = v.trim(); });
+    if (damage) data.damage = damage;
+    onSave(data, media.pending);
   };
   return (
     <form onSubmit={submit}>
@@ -221,6 +238,13 @@ function RecordForm({ cfg, type, record, onSave, onCancel }) {
             );
           })}
         </div>
+        {type === "inventory" && <VehicleMediaForm vehicle={vals} storedId={record?.id} value={media} onChange={setMedia} settings={settings} toast={toast} />}
+        {type === "inventory" && (
+          <details className="vm-form" open={damageOpen} onToggle={(e) => setDamageOpen(e.currentTarget.open)}>
+            <summary className="media-h"><Icon n="alert" s={15} /><b>Damage inspection</b><span className="muted" style={{ fontSize: 10 }}>{damageSummary(damage)}</span></summary>
+            {damageOpen && <DamageInspector vehicle={{ ...record, ...vals }} value={damage} onChange={setDamage} settings={settings} toast={toast} />}
+          </details>
+        )}
         <p className="page-note" style={{ marginTop: 15 }}>Fields marked * are required. Changes are saved in this browser's demo workspace.</p>
       </div>
       <div className="modal-foot">
@@ -231,10 +255,34 @@ function RecordForm({ cfg, type, record, onSave, onCancel }) {
   );
 }
 
-function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, openMedia, toast, go }) {
+function DamageModal({ owner, settings, onClose, onSave, toast, goSettings }) {
+  const [damage, setDamage] = useState(() => owner.rec.damage || null);
+  const { shape } = owner;
+  return (
+    <div className="modal-backdrop open" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="modal wide" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div className="modal-head"><h2 id="modalTitle">Damage inspection · {`${shape.brand} ${shape.model}`.trim()} <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>{owner.rec.id}</span></h2><button className="close" onClick={onClose} aria-label="Close">×</button></div>
+        <div className="modal-body"><DamageInspector vehicle={shape} value={damage} onChange={setDamage} settings={settings} toast={toast} goSettings={goSettings} /></div>
+        <div className="modal-foot">
+          <span className="muted" style={{ marginRight: "auto", fontSize: 12 }}>{damageSummary(damage)}</span>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn primary" onClick={() => onSave(owner.key, owner.rec.id, damage)}>Save damage</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage, openMedia, openDamage, toast, go }) {
   if (!modal) return null;
   const isView = modal.kind === "view";
   const cfg = CONFIG[modal.page];
+  if (modal.kind === "damage") {
+    const owner = damageOwner(db, modal.key, modal.id);
+    return owner && <DamageModal owner={owner} settings={settings} onClose={onClose} onSave={onSaveDamage} toast={toast} goSettings={() => { onClose(); go("settings"); }} />;
+  }
+  const dmgKey = isView && { inventory: "vehicles", service: "jobs" }[modal.page];
+  const dmgOwner = dmgKey && damageOwner(db, dmgKey, modal.record.id);
   if (modal.kind === "media") {
     const v = db.vehicles.find((x) => x.id === modal.id);
     if (!v) return null;
@@ -256,18 +304,24 @@ function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, openMedia, t
           <>
             <div className="modal-body">
               {modal.page === "inventory" && <div className="v-detail" style={{ marginBottom: 8 }}><Vehicle360 vehicle={db.vehicles.find((x) => x.id === modal.record.id) || modal.record} settings={settings} variant="detail" onManage={() => openMedia(modal.record.id)} /></div>}
-              {Object.entries(modal.record).filter(([k, v]) => k !== "ai" || v).map(([k, v]) => (
+              {dmgOwner && (
+                <div className="detail-row"><span>Damage</span>
+                  <div><span className={`pill ${damagedParts(dmgOwner.rec.damage).length ? "r" : "g"}`}>{damageSummary(dmgOwner.rec.damage)}</span>
+                    {dmgOwner.rec !== modal.record && dmgOwner.key === "vehicles" && <span className="muted" style={{ fontSize: 11 }}> · on stock vehicle {dmgOwner.rec.id}</span>}</div></div>
+              )}
+              {Object.entries(modal.record).filter(([k, v]) => (k !== "ai" || v) && k !== "damage").map(([k, v]) => (
                 <div className="detail-row" key={k}><span>{k === "ai" ? "AI identification" : k.replace(/([A-Z])/g, " $1")}</span>
                   <div>{k === "ai" ? `${v.make} ${v.model}${v.generation ? ` (${v.generation})` : ""} · ${v.source === "estimate" ? "estimate" : `${Math.round(v.confidence * 100)}% confidence (${v.aiModel || "local AI"})`}` : String(v ?? "")}</div></div>
               ))}
             </div>
             <div className="modal-foot">
-              {modal.page === "inventory" && <button className="btn" style={{ marginRight: "auto" }} onClick={() => openMedia(modal.record.id)}><Icon n="spin" s={14} />Manage 360° media</button>}
-              <button className="btn" onClick={onClose}>Close</button>
+              {modal.page === "inventory" && <button className="btn" onClick={() => openMedia(modal.record.id)}><Icon n="spin" s={14} />Manage 360° media</button>}
+              {dmgKey && <button className="btn" onClick={() => openDamage(dmgKey, modal.record.id)}><Icon n="alert" s={14} />Damage inspection</button>}
+              <button className="btn" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
             </div>
           </>
         ) : (
-          <RecordForm cfg={cfg} type={modal.page} record={modal.record} onSave={onSave} onCancel={onClose} />
+          <RecordForm cfg={cfg} type={modal.page} record={modal.record} onSave={onSave} onCancel={onClose} settings={settings} toast={toast} />
         )}
       </section>
     </div>
@@ -744,6 +798,12 @@ export default function App() {
     setDb((d) => ({ ...d, vehicles: d.vehicles.map((v) => (v.id === id ? { ...v, ...patch } : v)) }));
     toast("360° media settings saved.");
   };
+  const openDamage = (key, id) => setModal({ kind: "damage", page: pageForKey(key), key, id });
+  const saveDamage = (key, id, damage) => {
+    setDb((d) => ({ ...d, [key]: d[key].map((r) => (r.id === id ? { ...r, damage } : r)) }));
+    setModal(null);
+    toast(`Damage saved: ${damageSummary(damage).toLowerCase()}.`);
+  };
   const saveAi = (id, ai) => setDb((d) => ({ ...d, vehicles: d.vehicles.map((v) => (v.id === id ? { ...v, ai } : v)) }));
 
   const onAction = (action, key, id) => {
@@ -752,6 +812,7 @@ export default function App() {
     if (action === "view") return setModal({ kind: "view", page: pageForKey(key), record: r });
     if (action === "edit") return openForm(pageForKey(key), r);
     if (action === "media") return openMedia(id);
+    if (action === "damage") return openDamage(key, id);
     if (action === "advance-sale") {
       const i = STAGES.indexOf(r.status);
       if (i < 0 || i === STAGES.length - 1) return toast("This order is already at a terminal stage.");
@@ -762,7 +823,17 @@ export default function App() {
     }
   };
 
-  const saveRecord = (data) => {
+  // uploads from the vehicle form are stored under the (possibly renamed) Stock ID once the record is accepted
+  const storeFormMedia = async (oldId, id, pending) => {
+    const moved = oldId && oldId !== id ? await getLocalMedia(oldId) : null;
+    if (!moved && !Object.keys(pending).length) return;
+    try {
+      await setLocalMedia(id, { ...(moved && { frames: moved.frames, glb: moved.glb }), ...pending });
+      if (moved) await setLocalMedia(oldId, { frames: [], glb: null });
+    } catch { toast("Couldn't save the 360° photos / 3D file in this browser (storage may be full)."); }
+  };
+
+  const saveRecord = (data, media) => {
     const { page: p, record } = modal, c = CONFIG[p], next = clone(db), arr = next[c.key], editId = record?.id;
     if (p === "inventory" && arr.some((x) => x.vin === data.vin && x.id !== editId)) return toast("That VIN already exists. Each vehicle must have a unique VIN.");
     if (p === "parts" && arr.some((x) => x.sku === data.sku && x.id !== editId)) return toast("That part number already exists.");
@@ -783,6 +854,7 @@ export default function App() {
     }
     setDb(next);
     setModal(null);
+    if (media) storeFormMedia(editId, data.id, media);
     toast(record ? "Record updated." : "Record created successfully.");
   };
 
@@ -862,7 +934,7 @@ export default function App() {
         </div>
       </div>
 
-      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} openMedia={openMedia} toast={toast} go={go} />
+      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} onSaveDamage={saveDamage} openMedia={openMedia} openDamage={openDamage} toast={toast} go={go} />
       <div className={`toast ${toastMsg ? "show" : ""}`} role="status">{toastMsg}</div>
     </div>
   );

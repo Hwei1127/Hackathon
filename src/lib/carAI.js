@@ -7,6 +7,7 @@
    ───────────────────────────────────────────────────────────── */
 import { bodyTypeOf } from "./vehicleMedia.js";
 import { tint } from "../components/CarArt.jsx";
+import { PARTS, PART_IDS } from "./damage.js";
 
 const BODY_KEYS = ["sedan", "suv", "hatch", "pickup", "mpv", "coupe"];
 export const BODY_LABEL = { sedan: "Sedan", suv: "SUV", hatch: "Hatchback", pickup: "Pickup", mpv: "MPV", coupe: "Coupe" };
@@ -91,15 +92,9 @@ function sameVehicle(spec, v) {
  *   photo: optional image Blob.  scan: true when the photo is a new picture to check against the record
  *   (the record is then not shown to the model, so it describes only what it sees).
  */
-export async function identifyVehicle(v, { url, model, photo, scan = false } = {}) {
+/** One structured-output chat call to the local Ollama model → parsed JSON object. */
+async function askOllama({ url, model, system, user, schema }) {
   const base = (url || "http://localhost:11434").replace(/\/+$/, "");
-  const record = ["brand", "model", "year", "color"].map((k) => `${k}: ${v[k] ?? ""}`).join("\n");
-  const user = { role: "user" };
-  if (photo && scan) user.content = "Identify the car in this photo. If it is unclear, give your best guess with a low confidence.";
-  else if (photo) user.content = `Stock record:\n${record}\n\nThe photo shows this vehicle. Identify it, using the photo for the paint colour.`;
-  else user.content = `Stock record:\n${record}\n\nIdentify the vehicle in the record.`;
-  if (photo) user.images = [await toJpegBase64(photo)];
-
   let res;
   try {
     res = await fetch(`${base}/api/chat`, {
@@ -107,9 +102,9 @@ export async function identifyVehicle(v, { url, model, photo, scan = false } = {
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(240000),
       body: JSON.stringify({
-        model, stream: false, think: false, format: SPEC_SCHEMA,
+        model, stream: false, think: false, format: schema,
         options: { temperature: 0, num_predict: 1024 },
-        messages: [{ role: "system", content: SYSTEM }, user, SKIP_THINKING],
+        messages: [{ role: "system", content: system }, user, SKIP_THINKING],
       }),
     });
   } catch (e) {
@@ -122,10 +117,19 @@ export async function identifyVehicle(v, { url, model, photo, scan = false } = {
     throw new Error(`Ollama error ${res.status}: ${data.error || res.statusText}`);
   }
   const text = (data.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "");
-  const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-  let spec;
-  try { spec = JSON.parse(json); } catch { throw new Error("The local AI didn't return a usable answer. Try again."); }
+  try { return JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)); }
+  catch { throw new Error("The local AI didn't return a usable answer. Try again."); }
+}
 
+export async function identifyVehicle(v, { url, model, photo, scan = false } = {}) {
+  const record = ["brand", "model", "year", "color"].map((k) => `${k}: ${v[k] ?? ""}`).join("\n");
+  const user = { role: "user" };
+  if (photo && scan) user.content = "Identify the car in this photo. If it is unclear, give your best guess with a low confidence.";
+  else if (photo) user.content = `Stock record:\n${record}\n\nThe photo shows this vehicle. Identify it, using the photo for the paint colour.`;
+  else user.content = `Stock record:\n${record}\n\nIdentify the vehicle in the record.`;
+  if (photo) user.images = [await toJpegBase64(photo)];
+
+  const spec = await askOllama({ url, model, system: SYSTEM, user, schema: SPEC_SCHEMA });
   if (spec.isVehicle === false) throw new Error("No car was recognised in that photo.");
   if (!BODY_KEYS.includes(spec.bodyType)) spec.bodyType = bodyTypeOf(v);
   if (!/^#[0-9a-f]{6}$/i.test(spec.paintHex || "")) spec.paintHex = tint(spec.paintName || v.color);
@@ -137,4 +141,47 @@ export async function identifyVehicle(v, { url, model, photo, scan = false } = {
     matchesRecord: scan ? sameVehicle(spec, v) : true,
     source: "local", aiModel: model, fromPhoto: !!photo, at: Date.now(),
   };
+}
+
+/* ───────── damage assessment ───────── */
+const DAMAGE_SCHEMA = {
+  type: "object",
+  required: ["isVehicle", "parts", "summary"],
+  properties: {
+    isVehicle: { type: "boolean" },
+    parts: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["part", "severity", "note"],
+        properties: { part: { type: "string", enum: PART_IDS }, severity: { type: "integer", enum: [1, 2, 3] }, note: { type: "string" } },
+      },
+    },
+    summary: { type: "string" },
+  },
+};
+const DAMAGE_SYSTEM = `You inspect cars for a dealership workshop and list the exterior parts that are damaged.
+Allowed part ids: ${PARTS.map(([id, label]) => `${id} (${label})`).join(", ")}.
+Left and right are the driver's left and right, sitting in the car facing forward (Malaysia: right-hand drive, so the driver's side is the right).
+In a photo of the car's front, the car's left side is on the right of the image; in a photo of its rear, the car's left is on the left of the image.
+severity: 1 minor (scratches, scuffs, chips), 2 moderate (dents, cracks, bent), 3 severe (broken, shattered, crushed, missing).
+List only parts that are actually damaged; an empty list means no visible damage. note is a few words describing the damage.
+isVehicle is false if a photo does not show a car. summary is one sentence for the service advisor.
+Reply with a single JSON object only.`;
+
+/**
+ * Find damaged parts with the local model, from a written description and/or a photo.
+ * Returns [{ part, s, note }] plus the model's summary.
+ */
+export async function assessDamage(v, { url, model, text = "", photo } = {}) {
+  const name = `${v.brand || ""} ${v.model || ""}`.trim();
+  const user = { role: "user" };
+  user.content = [name && `Vehicle: ${name}`, text.trim() && `Reported damage: ${text.trim()}`,
+    photo ? "Identify the damaged parts visible in this photo." : "Map the reported damage to the allowed part ids."].filter(Boolean).join("\n\n");
+  if (photo) user.images = [await toJpegBase64(photo)];
+  const r = await askOllama({ url, model, system: DAMAGE_SYSTEM, user, schema: DAMAGE_SCHEMA });
+  if (photo && r.isVehicle === false) throw new Error("No car was recognised in that photo.");
+  const parts = (Array.isArray(r.parts) ? r.parts : []).filter((p) => PART_IDS.includes(p.part))
+    .map((p) => ({ part: p.part, s: Math.max(1, Math.min(3, Number(p.severity) || 2)), note: String(p.note || "") }));
+  return { parts, summary: String(r.summary || "") };
 }

@@ -86,7 +86,7 @@ function FrameSpinner({ frames, auto, still, onFail, label }) {
 }
 
 /* Google <model-viewer> for .glb files — loaded only when a 3D file exists. */
-function ModelBox({ src, auto, onFail, label }) {
+export function ModelBox({ src, auto, onFail, label }) {
   const [ready, setReady] = useState(() => typeof customElements !== "undefined" && !!customElements.get("model-viewer"));
   const ref = useRef(null);
   useEffect(() => {
@@ -121,9 +121,11 @@ function ModelBox({ src, auto, onFail, label }) {
  *   5. Illustration            body type detected from the model name
  * If a source fails to load, the next one is used automatically.
  * variant: "hero" | "detail" (interactive) or "card" (single still image)
+ * media: optional { frames, glb } object URLs shown instead of what is stored for v.id (unsaved uploads)
  */
-export default function Vehicle360({ vehicle: v, settings, variant = "hero", onManage }) {
-  const local = useLocalMedia(v.id);
+export default function Vehicle360({ vehicle: v, settings, variant = "hero", onManage, media }) {
+  const stored = useLocalMedia(v.id);
+  const local = media || stored;
   const hosted = useMemo(() => expandFrames(v.framesUrl || ""), [v.framesUrl]);
   const renders = useMemo(() => imaginFrames(v, settings), [v.brand, v.model, v.year, v.color, v.imaginModel, settings?.imaginKey, settings?.imaginAngles]);
   const glb = local.glb || v.glbUrl;
