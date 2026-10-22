@@ -1,16 +1,20 @@
 import React, { useState, useEffect, useRef } from "react";
 import Icon, { Logo } from "./components/Icon.jsx";
-import Vehicle360 from "./components/Vehicle360.jsx";
+import Vehicle360, { ModelBox } from "./components/Vehicle360.jsx";
 import MediaManager, { VehicleMediaForm } from "./components/MediaManager.jsx";
 import AiIdentify from "./components/AiIdentify.jsx";
 import DamageInspector from "./components/DamageInspector.jsx";
 import GlobalSearch from "./components/GlobalSearch.jsx";
 import Notifications from "./components/Notifications.jsx";
+import { AccountMenu, WorkspaceSwitcher, SignInScreen, loadUser, saveUser } from "./components/Account.jsx";
+import { STAFF } from "./data/staff.js";
 import { buildNotifications } from "./lib/notifications.js";
 import { damageSummary, damagedParts, PART_LABEL, SEVERITY, DAMAGE_SCALE } from "./lib/damage.js";
 import { INITIAL } from "./data/seed.js";
 import { api, diffDb } from "./lib/api.js";
-import { BODY_TYPES, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
+import { BODY_LABEL, estimateSpec } from "./lib/carAI.js";
+import { damageGlbUrl, specKey } from "./lib/car3d.js";
+import { BODY_TYPES, bodyTypeOf, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
 
 /* ───────────────────────── Data ───────────────────────── */
 const KEY = "autocore-db-v1";
@@ -301,8 +305,129 @@ function JobReport({ job, db, onClose }) {
   );
 }
 
-function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage, openMedia, openDamage, openReport, toast, go }) {
+/**
+ * Camera angle that faces the worst-damaged side. The model's front is +x and its right side +z;
+ * model-viewer's azimuth is 0° from the right side, 90° from the front, 180° from the left.
+ */
+function damageOrbit(damage) {
+  let x = 0, z = 0;
+  for (const [id, p] of damagedParts(damage)) {
+    const side = id.match(/_[fr]?([lr])$/)?.[1];
+    const along = /^(front_bumper|bonnet|windscreen|headlight|fender|mirror|door_f|wheel_f)/.test(id) ? 1
+      : /^(rear_bumper|boot|rear_window|taillight|quarter|door_r[lr]|wheel_r[lr])/.test(id) ? -1 : 0;
+    x += along * p.s;
+    z += (side === "r" ? 1 : side === "l" ? -1 : 0) * p.s;
+  }
+  if (!x && !z) return "35deg 75deg auto";
+  if (!x) x = 0.6 * Math.abs(z); // side damage only: lean towards the front for a three-quarter view
+  if (!z) z = 0.6 * Math.abs(x); // front or rear only: show a little of the right side too
+  return `${Math.round((Math.atan2(x, z) * 180) / Math.PI)}deg 72deg auto`;
+}
+
+/* The vehicle's generated 3D model with each part painted by damage (white → red) */
+function DamageModel({ v, settings }) {
+  const spec = v.ai || estimateSpec(v);
+  const parts = v.damage?.parts || {};
+  const sevKey = JSON.stringify(damagedParts(v.damage).map(([k, p]) => [k, p.s]).sort());
+  const [url, setUrl] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setUrl(null); setFailed(false);
+    damageGlbUrl(spec, parts).then((u) => alive && setUrl(u)).catch(() => alive && setFailed(true));
+    return () => { alive = false; };
+  }, [specKey(spec), sevKey]);
+  return (
+    <div className="v-detail vd-stage">
+      {failed ? <div className="spin-msg">Couldn't build the 3D damage view.</div>
+        : url ? <ModelBox key={url} src={url} auto={settings.autoRotate !== false && !damagedParts(v.damage).length} orbit={damageOrbit(v.damage)} onFail={() => setFailed(true)} label={`${v.brand} ${v.model} damage map`} />
+        : <div className="spin-msg">Building 3D damage view…</div>}
+      <span className="v-badge k-3d">Damage map</span>
+    </div>
+  );
+}
+
+/* Pop-out window for one vehicle: details on the left, damage 3D model in the middle, damage report on the right */
+function VehicleDetail({ v, db, settings, onClose, onAction, openMedia }) {
+  const damage = damagedParts(v.damage).sort((a, b) => b[1].s - a[1].s);
+  const worst = damage.length ? damage[0][1].s : 0;
+  const sale = db.sales.find((s) => s.vehicle === `${v.brand} ${v.model}` && s.status !== "Cancelled");
+  const facts = [["Stock ID", v.id], ["Year", v.year], ["Condition", v.condition], ["Colour", v.color], ["Mileage", `${Number(v.mileage || 0).toLocaleString()} km`], ["Registration", v.reg || "—"],
+    ["Branch", v.branch], ["Location", v.location || "—"], ["Body type", BODY_LABEL[v.ai?.bodyType || bodyTypeOf(v)] || "—"], ["VIN", v.vin]];
+  const recorded = v.damage?.at ? fmtDay(new Date(v.damage.at)) : null;
+  const source = { local: `AI (${v.damage?.aiModel || "local"})`, text: "Written description", manual: "Manual entry" }[v.damage?.source] || "Inspection";
+  return (
+    <div className="modal-backdrop open" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="modal vd" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div className="modal-head">
+          <h2 id="modalTitle">{v.brand} {v.model} <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>{v.id}</span></h2>
+          <button className="close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body vd-body">
+          <div className="vd-info">
+            <div className="vd-top">
+              <div><small>Selling price</small><b className="vd-price">{money(v.price)}</b></div>
+              <Badge s={v.status} />
+            </div>
+            <div className="vd-money">
+              <span>Cost <b>{money(v.cost)}</b></span>
+              <span>Margin <b className="up">{money(v.price - v.cost)}</b>{v.price ? ` (${Math.round(((v.price - v.cost) / v.price) * 100)}%)` : ""}</span>
+            </div>
+            <dl className="vd-facts">{facts.map(([k, val]) => <div key={k}><dt>{k}</dt><dd>{val}</dd></div>)}</dl>
+            {(v.ai || sale) && (
+              <div className="vd-notes">
+                {v.ai && <div><Icon n="spark" s={13} /><span>AI identified</span><b>{v.ai.make} {v.ai.model}{v.ai.generation ? ` (${v.ai.generation})` : ""}</b></div>}
+                {sale && <button className="vd-link" onClick={() => onAction("view", "sales", sale.id)}><Icon n="sales" s={13} /><span>Sales order</span><b>{sale.id} · {sale.status}</b></button>}
+              </div>
+            )}
+          </div>
+
+          <div className="vd-center">
+            <DamageModel v={v} settings={settings} />
+            <div className="dmg-legend vd-legend" aria-hidden="true">{SEVERITY.map((s, i) => <span key={s}><i style={{ background: DAMAGE_SCALE[i] }} />{s}</span>)}</div>
+          </div>
+
+          <div className="vd-report">
+            <div className="vd-rhead">
+              <h3>Damage report</h3>
+              <span className={`pill ${!damage.length ? "g" : worst >= 3 ? "r" : "n"}`}>{damage.length ? `${plural(damage.length, "part")} · ${SEVERITY[worst].toLowerCase()}` : "No damage"}</span>
+            </div>
+            {damage.length ? (
+              <>
+                {v.damage?.summary && <p className="vd-summary">{v.damage.summary}</p>}
+                <ul className="vd-parts">
+                  {damage.map(([id, p]) => (
+                    <li key={id}>
+                      <i style={{ background: DAMAGE_SCALE[p.s] }} />
+                      <span><b>{PART_LABEL[id] || id}</b>{p.note && <small>{p.note}</small>}</span>
+                      <em className={`sev-${p.s}`}>{SEVERITY[p.s]}</em>
+                    </li>
+                  ))}
+                </ul>
+                <p className="vd-meta">{[source, recorded && `recorded ${recorded}`].filter(Boolean).join(" · ")}</p>
+              </>
+            ) : (
+              <div className="vd-clean"><Icon n="check" s={18} /><b>No damage recorded</b>Every part shows white on the model. Use Damage inspection to record any damage.</div>
+            )}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={() => onAction("edit", "vehicles", v.id)}><Icon n="settings" s={14} />Edit</button>
+          <button className="btn" onClick={() => openMedia(v.id)}><Icon n="spin" s={14} />360° media</button>
+          <button className="btn" onClick={() => onAction("damage", "vehicles", v.id)}><Icon n="alert" s={14} />Damage inspection</button>
+          <button className="btn" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage, openMedia, openDamage, openReport, onAction, toast, go }) {
   if (!modal) return null;
+  if (modal.kind === "vehicle") {
+    const v = db.vehicles.find((x) => x.id === modal.id);
+    return v && <VehicleDetail v={v} db={db} settings={settings} onClose={onClose} onAction={onAction} openMedia={openMedia} />;
+  }
   if (modal.kind === "report") {
     const job = db.jobs.find((j) => j.id === modal.id);
     return job && <JobReport job={job} db={db} onClose={onClose} />;
@@ -535,7 +660,7 @@ function BranchNetwork({ db, go, branch, setBranch }) {
   );
 }
 
-function FeaturedVehicle({ db, go, onAction, settings, openMedia, saveAi, toast }) {
+function FeaturedVehicle({ db, go, onAction, settings, openMedia, saveAi, toast, wide }) {
   const list = db.vehicles.length ? db.vehicles : [];
   const [i, setI] = useState(0);
   if (!list.length) return <section className="card"><div className="empty"><b>No vehicles in stock</b></div></section>;
@@ -550,7 +675,7 @@ function FeaturedVehicle({ db, go, onAction, settings, openMedia, saveAi, toast 
           <button className="mini-btn" onClick={() => go("inventory")}>View all <Icon n="arrow" s={11} /></button>
         </div>
       </div>
-      <div className="feat">
+      <div className={`feat${wide ? " wide" : ""}`}>
         <div className="feat-stage">
           <Vehicle360 key={v.id} vehicle={v} settings={settings} variant="hero" onManage={() => openMedia(v.id)} />
           <div className="feat-nav"><button aria-label="Previous vehicle" onClick={() => step(-1)}><Icon n="left" s={12} w={2.4} /></button><button aria-label="Next vehicle" onClick={() => step(1)}><Icon n="right" s={12} w={2.4} /></button></div>
@@ -658,14 +783,15 @@ function Dashboard({ db, go, onAction, openForm, downloadCsv, toast, settings, o
       <BranchNetwork db={db} go={go} branch={branch} setBranch={setBranch} />
 
       <div className="grid row2" style={{ marginTop: 24 }}>
-        <div className="grid col-stack">
-          <section className="card">
-            <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers · {scope}</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
-            <DataTable rows={recentSales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
-          </section>
-          <TopConsultants db={view} go={go} scope={scope} />
-        </div>
-        <FeaturedVehicle key={branch} db={view} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
+        <section className="card">
+          <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers · {scope}</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
+          <DataTable rows={recentSales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
+        </section>
+        <TopConsultants db={view} go={go} scope={scope} />
+      </div>
+
+      <div className="grid" style={{ marginTop: 14 }}>
+        <FeaturedVehicle key={branch} wide db={view} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
       </div>
 
       <div className="grid tri">
@@ -715,27 +841,45 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
       <option value="">All statuses</option>{statuses.map((x) => <option key={x}>{x}</option>)}
     </select>
   );
+  const branchSel = (
+    <select className="select filter-select" value={filters.branch} onChange={(e) => setF({ branch: e.target.value })}>
+      <option>All branches</option>{BRANCHES.map((x) => <option key={x}>{x}</option>)}
+    </select>
+  );
 
   if (page === "inventory" && viewMode === "cards") {
+    const perPage = 12, cards = filtered.slice((pageNum - 1) * perPage, pageNum * perPage);
     return (
       <>
         <PageHead page={page} title={c.title} desc={c.desc}>
-          <button className="btn" onClick={() => setViewMode("table")}><Icon n="grid" s={14} />Table view</button>
+          <button className="btn" onClick={exportCurrent}><Icon n="download" s={14} />Export</button>
           <button className="btn primary" onClick={() => openForm(page)}><Icon n="plus" s={14} w={2.2} />{c.add}</button>
         </PageHead>
-        <div className="table-toolbar card" style={{ marginBottom: 14 }}>{search}{statusSel}</div>
-        <div className="grid vehicle-grid">
-          {filtered.map((v) => (
-            <div className="card vehicle-card" key={v.id}>
-              <div className="vehicle-art"><small>{v.id}</small><Vehicle360 vehicle={v} settings={settings} variant="card" /></div>
-              <div className="vehicle-info">
-                <h3>{v.brand} {v.model}</h3>
-                <p>{v.year} · {v.condition} · {Number(v.mileage).toLocaleString()} km · {v.branch}</p>
-                <div style={{ marginBottom: 12 }}><Badge s={v.status} /></div>
-                <div className="vehicle-meta"><span className="vehicle-price">{money(v.price)}</span><div className="table-actions"><button className="mini-btn" onClick={() => openMedia(v.id)}><Icon n="spin" s={11} />360°</button><button className="mini-btn" onClick={() => onAction("view", "vehicles", v.id)}>Details <Icon n="arrow" s={11} /></button></div></div>
-              </div>
-            </div>
-          ))}
+        <div className="table-toolbar card" style={{ marginBottom: 14 }}>
+          {search}{statusSel}{branchSel}
+          <div className="view-toggle" role="group" aria-label="Layout">
+            <button className="on" aria-pressed="true" title="Card view"><Icon n="dashboard" s={14} /></button>
+            <button aria-pressed="false" title="Table view" onClick={() => { setViewMode("table"); setPageNum(1); }}><Icon n="grid" s={14} /></button>
+          </div>
+        </div>
+        {cards.length ? (
+          <div className="grid vehicle-grid">
+            {cards.map((v) => (
+              <button className="vehicle-item" key={v.id} onClick={() => onAction("view", "vehicles", v.id)} aria-label={`${v.brand} ${v.model}, ${v.status}, ${money(v.price)}. Open details`}>
+                <span className="card vehicle-tile"><Vehicle360 vehicle={v} settings={settings} variant="card" /></span>
+                <span className="vt-name">{v.brand} {v.model}</span>
+                <span className="vt-sub"><span>{v.id} · {money(v.price)}</span><Badge s={v.status} /></span>
+              </button>
+            ))}
+          </div>
+        ) : <div className="card"><div className="empty"><Icon n="search" s={22} /><b>No vehicles found</b>Try adjusting your search or filters.</div></div>}
+        <div className="card-foot">
+          <span>Showing {filtered.length ? (pageNum - 1) * perPage + 1 : 0}–{Math.min(pageNum * perPage, filtered.length)} of {plural(filtered.length, "vehicle")}</span>
+          <div className="pagination">
+            <button disabled={pageNum === 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))} aria-label="Previous page">←</button>
+            {Array.from({ length: Math.max(1, Math.ceil(filtered.length / perPage)) }, (_, k) => <button key={k} className={pageNum === k + 1 ? "cur" : ""} onClick={() => setPageNum(k + 1)}>{k + 1}</button>)}
+            <button disabled={pageNum * perPage >= filtered.length} onClick={() => setPageNum((n) => n + 1)} aria-label="Next page">→</button>
+          </div>
         </div>
       </>
     );
@@ -756,12 +900,14 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
       )}
       <section className="card table-card">
         <div className="table-toolbar">
-          {search}{statusSel}
-          <select className="select filter-select" value={filters.branch} onChange={(e) => setF({ branch: e.target.value })}>
-            <option>All branches</option>{BRANCHES.map((x) => <option key={x}>{x}</option>)}
-          </select>
+          {search}{statusSel}{branchSel}
           {filters.low && <button className="filter-chip" onClick={() => setF({ low: false })} aria-label="Remove low stock filter">Low stock only <span aria-hidden="true">×</span></button>}
-          {page === "inventory" && <button className="btn" onClick={() => setViewMode("cards")}><Icon n="dashboard" s={14} />Card view</button>}
+          {page === "inventory" && (
+            <div className="view-toggle" role="group" aria-label="Layout">
+              <button aria-pressed="false" title="Card view" onClick={() => { setViewMode("cards"); setPageNum(1); }}><Icon n="dashboard" s={14} /></button>
+              <button className="on" aria-pressed="true" title="Table view"><Icon n="grid" s={14} /></button>
+            </div>
+          )}
         </div>
         <DataTable rows={slice} cols={c.cols} type={c.key} onAction={onAction} />
         <div className="table-foot">
@@ -905,7 +1051,7 @@ function ImagerySettings({ settings, setSettings, db, toast, openMedia }) {
 }
 
 function SettingsPage({ toast, resetDemo, settings, setSettings, db, openMedia }) {
-  const users = [["Jordan Lee", "Dealer Principal", "All branches"], ["Daniel Wong", "Sales Consultant", "Kuala Lumpur"], ["Sarah Lim", "Sales Manager", "Petaling Jaya"], ["Arif Hassan", "Technician", "Kuala Lumpur"], ["Mei Chen", "Finance Officer", "All branches"]];
+  const users = STAFF.map((p) => [p.name, p.role, p.branch]);
   return (
     <>
       <PageHead page="settings" title="Administration" desc="Manage access, branches, and operational preferences.">
@@ -913,7 +1059,7 @@ function SettingsPage({ toast, resetDemo, settings, setSettings, db, openMedia }
       </PageHead>
       <div className="grid lower-grid">
         <section className="card">
-          <div className="card-head"><h3>Users & roles</h3><span className="status s-green">9 active</span></div>
+          <div className="card-head"><h3>Users & roles</h3><span className="status s-green">{users.length} active</span></div>
           <div className="table-wrap"><table>
             <thead><tr><th>User</th><th>Role</th><th>Branch</th><th>Status</th></tr></thead>
             <tbody>{users.map((u, k) => <tr key={u[0]}><td><span className="ag-name"><span className="ag-av" style={{ background: AV_COLORS[k % AV_COLORS.length] }}>{initials(u[0])}</span><b>{u[0]}</b></span></td><td>{u[1]}</td><td>{u[2]}</td><td><Badge s="Active" /></td></tr>)}</tbody>
@@ -1008,8 +1154,11 @@ export default function App() {
   const [page, setPage] = useState("dashboard");
   const [filters, setFilters] = useState(NO_FILTERS);
   const [pageNum, setPageNum] = useState(1);
-  const [viewMode, setViewMode] = useState("table");
-  const [dashBranch, setDashBranch] = useState("All branches");
+  const [viewMode, setViewMode] = useState("cards"); // Vehicle Inventory: "cards" | "table"
+  const [user, setUserState] = useState(loadUser);
+  const setUser = (u) => { setUserState(u); saveUser(u); };
+  // the workspace branch: filters the dashboard and is the starting branch filter on branch-based pages
+  const [dashBranch, setDashBranch] = useState(() => loadUser().branch || "All branches");
   const [modal, setModal] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
@@ -1090,7 +1239,7 @@ export default function App() {
   }, []);
 
   const toast = (msg) => { setToastMsg(msg); clearTimeout(timer.current); timer.current = setTimeout(() => setToastMsg(""), 2600); };
-  const go = (p, search = "", extra = {}) => { setPage(p); setPageNum(1); setFilters({ ...NO_FILTERS, search, ...extra }); setMenuOpen(false); window.scrollTo?.(0, 0); };
+  const go = (p, search = "", extra = {}) => { setPage(p); setPageNum(1); setFilters({ ...NO_FILTERS, ...(["inventory", "customers", "service"].includes(p) && { branch: dashBranch }), search, ...extra }); setMenuOpen(false); window.scrollTo?.(0, 0); };
 
   const openForm = (p, record = null) => setModal({ kind: "form", page: p, record });
   const openMedia = (id) => setModal({ kind: "media", page: "inventory", id });
@@ -1110,6 +1259,7 @@ export default function App() {
     const r = db[key]?.find((x) => x.id === id);
     if (!r) return;
     if (action === "report" || ((action === "edit" || action === "damage") && isClosedJob(key, r))) return setModal({ kind: "report", page: "service", id });
+    if (action === "view" && key === "vehicles") return setModal({ kind: "vehicle", page: "inventory", id });
     if (action === "view") return setModal({ kind: "view", page: pageForKey(key), record: r });
     if (action === "edit") return openForm(pageForKey(key), r);
     if (action === "media") return openMedia(id);
@@ -1201,6 +1351,8 @@ export default function App() {
     </button>
   );
 
+  if (user.signedOut) return <SignInScreen onSignIn={(p) => { setUser({ ...p, signedOut: false }); setDashBranch(p.branch); go("dashboard"); toast(`Welcome back, ${p.name.split(" ")[0]}.`); }} />;
+
   return (
     <div className="app">
       <div className="frame">
@@ -1216,7 +1368,7 @@ export default function App() {
             </button>
             <button className="icon-btn hide-sm" title="Administration" onClick={() => go("settings")}><Icon n="settings" s={16} /></button>
             <Notifications db={db} toast={toast} onOpen={(link) => onAction("view", link.key, link.id)} />
-            <div className="avatar">JL</div><div className="user">Jordan Lee<small>Dealer Principal</small></div>
+            <AccountMenu user={user} setUser={setUser} workspace={dashBranch} setWorkspace={setDashBranch} branches={BRANCHES} go={go} toast={toast} />
           </div>
         </header>
 
@@ -1227,7 +1379,7 @@ export default function App() {
             <div className="side-bottom">
               <div className="nav-label">Insights</div>
               <nav className="nav">{NAV_INSIGHTS.map(NavBtn)}</nav>
-              <div className="branch-mini"><div className="branch-icon"><Icon n="home" s={15} /></div><div><b>AutoCore Group</b><small>3 active branches</small></div><span style={{ marginLeft: "auto", color: "var(--dim)", display: "flex" }}><Icon n="chevron" s={14} /></span></div>
+              <WorkspaceSwitcher workspace={dashBranch} setWorkspace={setDashBranch} branches={BRANCHES} db={db} go={go} />
             </div>
           </aside>
 
@@ -1235,7 +1387,7 @@ export default function App() {
         </div>
       </div>
 
-      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} onSaveDamage={saveDamage} openMedia={openMedia} openDamage={openDamage} openReport={(id) => onAction("report", "jobs", id)} toast={toast} go={go} />
+      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} onSaveDamage={saveDamage} openMedia={openMedia} openDamage={openDamage} openReport={(id) => onAction("report", "jobs", id)} onAction={onAction} toast={toast} go={go} />
       <div className={`toast ${toastMsg ? "show" : ""}`} role="status">{toastMsg}</div>
     </div>
   );

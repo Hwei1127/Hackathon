@@ -86,7 +86,7 @@ function FrameSpinner({ frames, auto, still, onFail, label }) {
 }
 
 /* Google <model-viewer> for .glb files — loaded only when a 3D file exists. */
-export function ModelBox({ src, auto, onFail, label }) {
+export function ModelBox({ src, auto, onFail, label, orbit = "35deg 75deg auto" }) {
   const [ready, setReady] = useState(() => typeof customElements !== "undefined" && !!customElements.get("model-viewer"));
   const ref = useRef(null);
   useEffect(() => {
@@ -105,7 +105,7 @@ export function ModelBox({ src, auto, onFail, label }) {
   return (
     <>
       <model-viewer ref={ref} src={src} alt={label} camera-controls="" touch-action="pan-y" ar="" ar-modes="webxr scene-viewer quick-look"
-        shadow-intensity="1" exposure="1.05" camera-orbit="35deg 75deg auto" interaction-prompt="none" {...opts}
+        shadow-intensity="1" exposure="1.05" camera-orbit={orbit} interaction-prompt="none" {...opts}
         style={{ width: "100%", height: "100%", background: "transparent", "--poster-color": "transparent" }} />
       <div className="spin-hint"><Icon n="spin" s={11} />Drag to orbit · scroll to zoom</div>
     </>
