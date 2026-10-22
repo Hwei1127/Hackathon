@@ -296,59 +296,166 @@ function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage
 /* ───────────────────────── Dashboard ───────────────────────── */
 const fmtDay = (d) => d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
-function OvCell({ label, value, icon, delta, down, foot = "vs last month", onMore }) {
+/* Section heading above a full-width dashboard card: "<b>Revenue</b> & Sales Statistics" */
+const DashTitle = ({ bold, rest, sub, children }) => (
+  <div className="dash-title">
+    <div><h2><b>{bold}</b> {rest}</h2>{sub && <p>{sub}</p>}</div>
+    <div className="head-actions">{children}</div>
+  </div>
+);
+const MoreBtn = ({ label, onClick }) => <button className="dots-btn" aria-label={label} title={label} onClick={onClick}><Icon n="more" s={18} w={2.4} /></button>;
+
+const OV_TONES = ["var(--amber)", "var(--blue)", "#c9d0de", "var(--green)"];
+function OvCell({ label, value, icon, tone, delta, down, foot = "vs last month", onMore }) {
+  const [lead, tail = ""] = foot.split("|");
   return (
-    <div className="ov-cell">
-      <div className="ov-top">{label}<button aria-label={`Open ${label}`} onClick={onMore}><Icon n="more" s={15} w={2.4} /></button></div>
-      <div className="ov-val"><span className="ov-ic"><Icon n={icon} s={15} /></span>{value}</div>
-      <div className="ov-foot">{delta ? <Delta v={delta} down={down} /> : <span className="pill n">{foot.split("|")[0]}</span>}<span>{delta ? foot : foot.split("|")[1] || ""}</span></div>
+    <button className="card ov-card" onClick={onMore} title={`Open ${label}`}>
+      <span className="ov-ic" style={{ color: tone }}><Icon n={icon} s={30} w={1.8} /></span>
+      <span className="ov-label">{label}</span>
+      <span className="ov-val">{value}</span>
+      <span className="ov-foot">{delta ? <><Delta v={delta} down={down} />{foot}</> : <><b>{lead}</b>{tail}</>}</span>
+    </button>
+  );
+}
+
+/* Monotone cubic path through the points, so the curve never overshoots between months */
+function smoothPath(pts) {
+  const n = pts.length;
+  if (n < 2) return "";
+  const dx = [], m = [], t = [];
+  for (let i = 0; i < n - 1; i++) { dx[i] = pts[i + 1][0] - pts[i][0]; m[i] = (pts[i + 1][1] - pts[i][1]) / dx[i]; }
+  t[0] = m[0]; t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : 3 * (dx[i - 1] + dx[i]) / ((2 * dx[i] + dx[i - 1]) / m[i - 1] + (dx[i] + 2 * dx[i - 1]) / m[i]);
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    d += `C${pts[i][0] + h},${pts[i][1] + t[i] * h} ${pts[i + 1][0] - h},${pts[i + 1][1] - t[i + 1] * h} ${pts[i + 1][0]},${pts[i + 1][1]}`;
+  }
+  return d;
+}
+const niceMax = (v) => {
+  const raw = v / 4, mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].find((s) => s * mag >= raw) * mag * 4;
+};
+const rmK = (k) => (k >= 1000 ? `RM ${(k / 1000).toFixed(k % 1000 ? 1 : 0)}M` : k ? `RM ${Math.round(k)}k` : "RM 0");
+
+/* Two-series line chart (values in RM thousands) with a crosshair tooltip */
+function LineChart({ rows, series }) {
+  const ref = useRef(null);
+  const [w, setW] = useState(800);
+  const [hover, setHover] = useState(null);
+  useEffect(() => {
+    const ro = new ResizeObserver(([e]) => setW(e.contentRect.width));
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  const H = 260, pad = { l: 56, r: 44, t: 12, b: 28 };
+  const max = niceMax(Math.max(...rows.flatMap((r) => series.map((s) => r[s.key]))));
+  const step = (w - pad.l - pad.r) / (rows.length - 1);
+  const x = (i) => pad.l + i * step, y = (v) => pad.t + (1 - v / max) * (H - pad.t - pad.b);
+  const every = step < 34 ? 2 : 1; // thin the month labels on narrow screens
+  const tipLeft = hover != null && hover > rows.length / 2;
+  return (
+    <div className="line-chart" ref={ref}>
+      <svg width={w} height={H} onMouseLeave={() => setHover(null)} role="img" aria-label={`Monthly revenue: ${series.map((s) => s.label).join(" and ")}`}>
+        {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+          <g key={f}>
+            <line x1={pad.l} x2={w - pad.r} y1={y(max * f)} y2={y(max * f)} stroke="var(--line)" />
+            <text x={pad.l - 10} y={y(max * f) + 3} textAnchor="end" fontSize="10" fill="var(--dim)">{rmK(max * f)}</text>
+          </g>
+        ))}
+        {rows.map((r, i) => i % every === (rows.length - 1) % every && <text key={r.label} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--dim)">{r.label}</text>)}
+        {hover != null && <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={H - pad.b} stroke="var(--line2)" />}
+        {series.map((s) => (
+          <g key={s.key}>
+            <path d={smoothPath(rows.map((r, i) => [x(i), y(r[s.key])]))} fill="none" stroke={s.color} strokeWidth="2" strokeLinecap="round" />
+            {rows.map((r, i) => <circle key={i} cx={x(i)} cy={y(r[s.key])} r={hover === i ? 5 : 4} fill={s.color} stroke="var(--card)" strokeWidth="2" />)}
+            <text x={x(rows.length - 1) + 10} y={y(rows[rows.length - 1][s.key]) + 3} fontSize="10" fill="var(--muted)">{s.label}</text>
+          </g>
+        ))}
+        {rows.map((r, i) => <rect key={i} x={x(i) - step / 2} y={pad.t} width={step} height={H - pad.t - pad.b} fill="transparent" onMouseEnter={() => setHover(i)} />)}
+      </svg>
+      {hover != null && (
+        <div className="lc-tip" style={tipLeft ? { right: w - x(hover) + 12 } : { left: x(hover) + 12 }}>
+          <b>{rows[hover].label}</b>
+          {series.map((s) => <div key={s.key}><i style={{ background: s.color }} />{s.label}<span>{money(rows[hover][s.key] * 1000)}</span></div>)}
+          <div className="lc-total">Total<span>{money(series.reduce((a, s) => a + rows[hover][s.key], 0) * 1000)}</span></div>
+        </div>
+      )}
+      <table className="sr-only">
+        <thead><tr><th>Month</th>{series.map((s) => <th key={s.key}>{s.label} (RM)</th>)}</tr></thead>
+        <tbody>{rows.map((r) => <tr key={r.label}><td>{r.label}</td>{series.map((s) => <td key={s.key}>{money(r[s.key] * 1000)}</td>)}</tr>)}</tbody>
+      </table>
     </div>
   );
 }
 
-function RevenueCard({ db, go }) {
-  const months = [["May", 62, 24], ["Jun", 74, 28], ["Jul", 58, 22], ["Aug", 88, 34], ["Sep", 79, 30], ["Oct", 96, 38]];
-  const max = Math.max(...months.map(([, n, u]) => n + u));
-  const total = months[months.length - 1];
-  const pins = [["Kuala Lumpur", "KL", 58, 40], ["Petaling Jaya", "PJ", 40, 62], ["Shah Alam", "SA", 22, 38]];
+const REV_SERIES = [{ key: "new", label: "New", color: "#7b73ff" }, { key: "used", label: "Used", color: "#199e70" }];
+function RevenueCard({ go }) {
+  // units sold per month (new, used) × RM 19.2k average
+  const months = [["Nov", 48, 20], ["Dec", 55, 18], ["Jan", 60, 26], ["Feb", 52, 22], ["Mar", 66, 25], ["Apr", 70, 30], ["May", 62, 24], ["Jun", 74, 28], ["Jul", 58, 22], ["Aug", 88, 34], ["Sep", 79, 30], ["Oct", 96, 38]];
+  const rows = months.map(([label, n, u]) => ({ label, new: n * 19.2, used: u * 19.2 }));
+  const [prev, cur] = rows.slice(-2).map((r) => r.new + r.used);
+  const change = ((cur - prev) / prev) * 100;
   return (
-    <section className="card">
-      <div className="rev">
-        <div className="rev-pane">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-            <div><div className="rev-label">Revenue · October</div><div className="rev-num">{money((total[1] + total[2]) * 1000 * 19.2)}</div></div>
-            <div className="legend"><span><i style={{ background: "#6c63ff" }} />New</span><span><i style={{ background: "#5fd38d" }} />Used</span></div>
+    <>
+      <DashTitle bold="Revenue" rest="& Sales Statistics" sub="New and used vehicle sales · last 12 months"><MoreBtn label="Open finance" onClick={() => go("finance")} /></DashTitle>
+      <section className="card rev-card">
+        <div className="rev-head">
+          <div>
+            <div className="rev-label">Revenue · October</div>
+            <div className="rev-num">{money(cur * 1000)}</div>
+            <div className="rev-sub"><Delta v={`${Math.abs(change).toFixed(1)}%`} down={change < 0} />vs September</div>
           </div>
-          <div className="stack">
-            {months.map(([m, n, u]) => (
-              <div className="stack-col" key={m} title={`${m}: new RM ${n * 19.2}k · used RM ${u * 19.2}k`}>
-                <div className="seg used" style={{ height: `${(u / max) * 100}%` }} />
-                <div className="seg new" style={{ height: `${(n / max) * 100}%` }} />
-              </div>
-            ))}
-          </div>
-          <div className="stack-x">{months.map(([m]) => <span key={m}>{m}</span>)}</div>
+          <div className="legend">{REV_SERIES.map((s) => <span key={s.key}><i style={{ background: s.color }} />{s.label}</span>)}</div>
         </div>
-        <div className="rev-pane">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div><div className="rev-label">Branch network</div><div style={{ fontSize: 13, fontWeight: 500, marginTop: 2 }}>{BRANCHES.length} active branches</div></div>
-            <button className="mini-btn" onClick={() => go("reports")}>Report <Icon n="arrow" s={11} /></button>
-          </div>
-          <div className="map">
-            <div className="map-dots" />
-            {[[30, 22], [72, 28], [80, 64], [50, 82], [14, 66]].map(([x, y]) => <span key={`${x}${y}`} className="glow" style={{ left: `${x}%`, top: `${y}%` }} />)}
-            {pins.map(([b, code, x, y]) => {
-              const n = db.vehicles.filter((v) => v.branch === b).length;
-              return (
-                <button key={b} className="pin" style={{ left: `${x}%`, top: `${y}%` }} title={b} onClick={() => go("inventory")}>
-                  <i>{code}</i><small>{n} vehicle{n === 1 ? "" : "s"}</small>
-                </button>
-              );
-            })}
-          </div>
+        <LineChart rows={rows} series={REV_SERIES} />
+      </section>
+    </>
+  );
+}
+
+const BRANCH_MAP = [["Kuala Lumpur", "KL", 58, 40, "#3987e5"], ["Petaling Jaya", "PJ", 40, 62, "#d95926"], ["Shah Alam", "SA", 22, 38, "#199e70"]];
+function BranchNetwork({ db, go }) {
+  const [hot, setHot] = useState(null);
+  const inStock = db.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status));
+  const rows = BRANCH_MAP.map(([name, code, x, y, color]) => {
+    const stock = inStock.filter((v) => v.branch === name);
+    return {
+      name, code, x, y, color, vehicles: stock.length,
+      jobs: db.jobs.filter((j) => j.branch === name && j.status !== "Completed").length,
+      value: stock.reduce((a, v) => a + Number(v.price || 0), 0),
+    };
+  });
+  const total = rows.reduce((a, r) => a + r.value, 0);
+  const hoverProps = (name) => ({ onMouseEnter: () => setHot(name), onMouseLeave: () => setHot(null), onFocus: () => setHot(name), onBlur: () => setHot(null) });
+  return (
+    <>
+      <DashTitle bold="Branch" rest="Network" sub={`${BRANCHES.length} active branches · Klang Valley`}><MoreBtn label="Open reports" onClick={() => go("reports")} /></DashTitle>
+      <section className="card branch">
+        <div className="map">
+          <div className="map-dots" />
+          {[[30, 22], [72, 28], [80, 64], [50, 82], [14, 66]].map(([x, y]) => <span key={`${x}${y}`} className="glow" style={{ left: `${x}%`, top: `${y}%` }} />)}
+          {rows.map((r) => (
+            <button key={r.name} className={`pin${hot === r.name ? " hot" : ""}`} style={{ left: `${r.x}%`, top: `${r.y}%`, "--pin": r.color }} title={r.name} onClick={() => go("inventory")} {...hoverProps(r.name)}>
+              <i>{r.code}</i><small>{r.vehicles} vehicle{r.vehicles === 1 ? "" : "s"}</small>
+            </button>
+          ))}
         </div>
-      </div>
-    </section>
+        <div className="branch-list">
+          <div className="br-row h"><span>Branch</span><span>In stock</span><span>Open jobs</span><span>Stock value</span></div>
+          {rows.map((r) => (
+            <button key={r.name} className={`br-row${hot === r.name ? " hot" : ""}`} onClick={() => go("inventory")} {...hoverProps(r.name)}>
+              <span className="br-name"><i style={{ background: r.color }} />{r.name}</span>
+              <span>{r.vehicles} vehicle{r.vehicles === 1 ? "" : "s"}</span>
+              <span>{r.jobs} job{r.jobs === 1 ? "" : "s"}</span>
+              <span><b>{total ? Math.round((r.value / total) * 100) : 0}%</b><small>{money(r.value)}</small></span>
+            </button>
+          ))}
+          <div className="br-foot"><span>Total stock value</span><b>{money(total)}</b></div>
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -421,38 +528,36 @@ function Dashboard({ db, go, onAction, openForm, exportCurrent, toast, settings,
   const end = new Date(), start = new Date(end.getTime() - 6 * 864e5);
   return (
     <>
-      <section className="card">
-        <div className="card-head">
-          <div><h3 style={{ fontSize: 16 }}>Weekly Overview</h3><p>{fmtDay(start)} – {fmtDay(end)}</p></div>
-          <div className="head-actions">
-            <select className="select filter-select" onChange={(e) => toast("Dashboard branch filter selected: " + e.target.value)}><option>All branches</option>{BRANCHES.map((b) => <option key={b}>{b}</option>)}</select>
-            <button className="btn" onClick={exportCurrent}><Icon n="download" s={14} />Export</button>
-            <button className="btn primary" onClick={() => openForm("sales")}><Icon n="plus" s={14} w={2.2} />New order</button>
-          </div>
-        </div>
-        <div className="ov">
-          <OvCell label="Vehicles in Stock" icon="car" value={db.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status)).length} delta="8.2%" onMore={() => go("inventory")} />
-          <OvCell label="Units Sold · MTD" icon="sales" value={completed.length + 12} delta="12.5%" onMore={() => go("sales")} />
-          <OvCell label="Sales Revenue" icon="wallet" value={money(revenue + 1840000)} delta="9.4%" onMore={() => go("finance")} />
-          <OvCell label="Gross Profit" icon="reports" value={money(386400)} delta="2.1%" down onMore={() => go("finance")} />
-          <OvCell label="Pending Deliveries" icon="calendar" value={db.sales.filter((s) => s.status !== "Completed").length} foot="2 today|scheduled" onMore={() => go("sales")} />
-          <OvCell label="Active Service Orders" icon="wrench" value={db.jobs.filter((j) => j.status !== "Completed").length} foot="2 flagged|need attention" onMore={() => go("service")} />
-          <OvCell label="Parts Stock Value" icon="box" value={money(db.parts.reduce((a, p) => a + p.qty * p.cost, 0))} foot={`${low} low|below minimum`} onMore={() => go("parts")} />
-          <OvCell label="Outstanding Payments" icon="clock" value={money(db.sales.filter((s) => s.payment !== "Paid").reduce((a, s) => a + s.amount, 0))} foot="3 invoices|to follow up" onMore={() => go("finance")} />
-        </div>
-      </section>
-
-      <div className="grid row2">
-        <RevenueCard db={db} go={go} />
-        <FeaturedVehicle db={db} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
+      <DashTitle bold="Weekly" rest="Overview" sub={`${fmtDay(start)} – ${fmtDay(end)}`}>
+        <select className="select filter-select" onChange={(e) => toast("Dashboard branch filter selected: " + e.target.value)}><option>All branches</option>{BRANCHES.map((b) => <option key={b}>{b}</option>)}</select>
+        <button className="btn" onClick={exportCurrent}><Icon n="download" s={14} />Export</button>
+        <button className="btn primary" onClick={() => openForm("sales")}><Icon n="plus" s={14} w={2.2} />New order</button>
+      </DashTitle>
+      <div className="grid ov-grid">
+        {[
+          { label: "Vehicles in Stock", icon: "car", value: db.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status)).length, delta: "8.2%", page: "inventory" },
+          { label: "Units Sold · MTD", icon: "sales", value: completed.length + 12, delta: "12.5%", page: "sales" },
+          { label: "Sales Revenue", icon: "wallet", value: money(revenue + 1840000), delta: "9.4%", page: "finance" },
+          { label: "Gross Profit", icon: "reports", value: money(386400), delta: "2.1%", down: true, page: "finance" },
+          { label: "Pending Deliveries", icon: "calendar", value: db.sales.filter((s) => s.status !== "Completed").length, foot: "2 today|scheduled", page: "sales" },
+          { label: "Active Service Orders", icon: "wrench", value: db.jobs.filter((j) => j.status !== "Completed").length, foot: "2 flagged|need attention", page: "service" },
+          { label: "Parts Stock Value", icon: "box", value: money(db.parts.reduce((a, p) => a + p.qty * p.cost, 0)), foot: `${low} low|below minimum`, page: "parts" },
+          { label: "Outstanding Payments", icon: "clock", value: money(db.sales.filter((s) => s.payment !== "Paid").reduce((a, s) => a + s.amount, 0)), foot: "3 invoices|to follow up", page: "finance" },
+        ].map(({ page, ...c }, i) => <OvCell key={c.label} {...c} tone={OV_TONES[i % OV_TONES.length]} onMore={() => go(page)} />)}
       </div>
 
-      <div className="grid row2">
-        <section className="card">
-          <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers across all branches</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
-          <DataTable rows={db.sales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
-        </section>
-        <TopConsultants db={db} go={go} />
+      <RevenueCard go={go} />
+      <BranchNetwork db={db} go={go} />
+
+      <div className="grid row2" style={{ marginTop: 24 }}>
+        <div className="grid col-stack">
+          <section className="card">
+            <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers across all branches</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
+            <DataTable rows={db.sales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
+          </section>
+          <TopConsultants db={db} go={go} />
+        </div>
+        <FeaturedVehicle db={db} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
       </div>
 
       <div className="grid tri">
