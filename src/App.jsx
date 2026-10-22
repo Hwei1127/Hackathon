@@ -4,7 +4,10 @@ import Vehicle360 from "./components/Vehicle360.jsx";
 import MediaManager, { VehicleMediaForm } from "./components/MediaManager.jsx";
 import AiIdentify from "./components/AiIdentify.jsx";
 import DamageInspector from "./components/DamageInspector.jsx";
-import { damageSummary, damagedParts } from "./lib/damage.js";
+import GlobalSearch from "./components/GlobalSearch.jsx";
+import Notifications from "./components/Notifications.jsx";
+import { buildNotifications } from "./lib/notifications.js";
+import { damageSummary, damagedParts, PART_LABEL, SEVERITY, DAMAGE_SCALE } from "./lib/damage.js";
 import { INITIAL } from "./data/seed.js";
 import { api, diffDb } from "./lib/api.js";
 import { BODY_TYPES, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
@@ -19,7 +22,7 @@ const STAGES = ["Enquiry", "Qualification", "Quotation", "Awaiting Approval", "A
 
 const NAV_MAIN = [
   ["dashboard", "dashboard", "Dashboard"], ["inventory", "car", "Vehicle Inventory"], ["sales", "sales", "Vehicle Sales"],
-  ["customers", "users", "Customers"], ["service", "wrench", "Workshop", 4], ["parts", "box", "Spare Parts"],
+  ["customers", "users", "Customers"], ["service", "wrench", "Workshop"], ["parts", "box", "Spare Parts"],
   ["warranty", "shield", "Warranty & Claims"], ["finance", "wallet", "Finance"],
 ];
 const NAV_INSIGHTS = [["reports", "reports", "Reports & Analytics"], ["settings", "settings", "Administration"]];
@@ -62,6 +65,8 @@ const SYNCED = "autocore-db-synced", PENDING = "autocore-db-pending"; // copy ha
 const flag = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
 const hadCopy = (() => { try { return !!localStorage.getItem(KEY); } catch { return false; } })();
 const matches = (r, q) => Object.values(r).join(" ").toLowerCase().includes(q.toLowerCase());
+// a module table's filters: search text, status, branch, and (parts) below minimum stock
+const passes = (r, f) => matches(r, f.search) && (!f.status || r.status === f.status) && (f.branch === "All branches" || r.branch === f.branch) && (!f.low || r.qty < r.min);
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 const AV_COLORS = ["#f6b26b", "#8fd6ae", "#a59cff", "#7cb7ff", "#f2939b"];
 
@@ -145,6 +150,9 @@ const Bars = ({ items }) => (
 );
 const Delta = ({ v, down }) => <span className={`pill ${down ? "r" : "g"}`}>{down ? "↓" : "↑"} {v}</span>;
 
+// a completed repair order is closed: no more edits or damage changes, only its report
+const isClosedJob = (type, r) => type === "jobs" && r?.status === "Completed";
+
 function DataTable({ rows, cols, type, onAction, compact }) {
   if (!rows.length) return <div className="empty"><Icon n="search" s={22} /><b>No records found</b>Try adjusting your search or filters.</div>;
   return (
@@ -157,9 +165,15 @@ function DataTable({ rows, cols, type, onAction, compact }) {
               {cols.map((c) => <td key={c}>{CELLS[type]?.[c] ? CELLS[type][c](r) : r[c.toLowerCase()] ?? "—"}</td>)}
               {!compact && <td><div className="table-actions">
                 <button className="mini-btn" onClick={() => onAction("view", type, r.id)}>View</button>
-                <button className="mini-btn" onClick={() => onAction("edit", type, r.id)}>Edit</button>
-                {type === "vehicles" && <button className="mini-btn" onClick={() => onAction("media", type, r.id)}><Icon n="spin" s={11} />360°</button>}
-                {(type === "vehicles" || type === "jobs") && <button className="mini-btn" onClick={() => onAction("damage", type, r.id)}><Icon n="alert" s={11} />Damage</button>}
+                {isClosedJob(type, r) ? (
+                  <button className="mini-btn report-btn" onClick={() => onAction("report", type, r.id)}><Icon n="reports" s={11} />Report{r.feedback?.comment && <i className="fb-dot" title="Customer left a comment" />}</button>
+                ) : (
+                  <>
+                    <button className="mini-btn" onClick={() => onAction("edit", type, r.id)}>Edit</button>
+                    {type === "vehicles" && <button className="mini-btn" onClick={() => onAction("media", type, r.id)}><Icon n="spin" s={11} />360°</button>}
+                    {(type === "vehicles" || type === "jobs") && <button className="mini-btn" onClick={() => onAction("damage", type, r.id)}><Icon n="alert" s={11} />Damage</button>}
+                  </>
+                )}
               </div></td>}
             </tr>
           ))}
@@ -238,10 +252,64 @@ function DamageModal({ owner, settings, onClose, onSave, toast, goSettings }) {
   );
 }
 
-function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage, openMedia, openDamage, toast, go }) {
+const Stars = ({ n }) => <span className="stars" aria-label={`${n} out of 5`}>{[1, 2, 3, 4, 5].map((i) => <span key={i} className={i <= n ? "on" : ""}>★</span>)}</span>;
+
+/* Read-only report for a completed repair order, with the customer's comment if they left one */
+function JobReport({ job, db, onClose }) {
+  const owner = damageOwner(db, "jobs", job.id);
+  const parts = damagedParts(owner?.rec.damage);
+  const fb = job.feedback;
+  return (
+    <div className="modal-backdrop open" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div className="modal-head"><h2 id="modalTitle">Job report · {job.id}</h2><button className="close" onClick={onClose} aria-label="Close">×</button></div>
+        <div className="modal-body report">
+          <div className="rp-hero">
+            <span className="veh-ic"><Icon n="wrench" s={16} /></span>
+            <div><b>{job.service}</b><small>{job.vehicle} · {job.customer}</small></div>
+            <Badge s={job.status} />
+          </div>
+          <dl className="rp-facts">
+            {[["Repair order", job.id], ["Completed", job.due ? fmtDay(new Date(`${job.due}T00:00`)) : "—"], ["Technician", job.technician], ["Branch", job.branch], ["Customer", job.customer], ["Vehicle", job.vehicle]].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}
+          </dl>
+
+          <h3 className="rp-h">Damage recorded</h3>
+          {parts.length ? (
+            <ul className="rp-damage">{parts.map(([id, p]) => <li key={id}><i style={{ background: DAMAGE_SCALE[p.s] }} />{PART_LABEL[id] || id}<span>{SEVERITY[p.s]}</span></li>)}</ul>
+          ) : <p className="rp-none">No damage was recorded for this job.</p>}
+
+          <h3 className="rp-h">Customer comment</h3>
+          {fb && (fb.comment || fb.rating) ? (
+            <figure className="rp-comment">
+              <div className="rp-c-head">
+                <span className="ag-av" style={{ background: AV_COLORS[job.customer.length % AV_COLORS.length] }}>{initials(job.customer)}</span>
+                <div><b>{job.customer}</b><small>{[fb.via, fb.at && fmtDay(new Date(`${fb.at}T00:00`))].filter(Boolean).join(" · ")}</small></div>
+                {fb.rating ? <Stars n={fb.rating} /> : null}
+              </div>
+              {fb.comment ? <blockquote>{fb.comment}</blockquote> : <p className="rp-none">Rated the service without leaving a comment.</p>}
+            </figure>
+          ) : (
+            <div className="rp-empty"><Icon n="users" s={18} /><b>No comment from the customer</b>{job.customer} hasn't left any feedback on this job.</div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <span className="muted" style={{ marginRight: "auto", fontSize: 11 }}>Completed jobs are closed for editing.</span>
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage, openMedia, openDamage, openReport, toast, go }) {
   if (!modal) return null;
+  if (modal.kind === "report") {
+    const job = db.jobs.find((j) => j.id === modal.id);
+    return job && <JobReport job={job} db={db} onClose={onClose} />;
+  }
   const isView = modal.kind === "view";
   const cfg = CONFIG[modal.page];
+  const closedJob = isView && modal.page === "service" && isClosedJob("jobs", modal.record);
   if (modal.kind === "damage") {
     const owner = damageOwner(db, modal.key, modal.id);
     return owner && <DamageModal owner={owner} settings={settings} onClose={onClose} onSave={onSaveDamage} toast={toast} goSettings={() => { onClose(); go("settings"); }} />;
@@ -274,14 +342,15 @@ function Modal({ modal, db, settings, onClose, onSave, onSaveMedia, onSaveDamage
                   <div><span className={`pill ${damagedParts(dmgOwner.rec.damage).length ? "r" : "g"}`}>{damageSummary(dmgOwner.rec.damage)}</span>
                     {dmgOwner.rec !== modal.record && dmgOwner.key === "vehicles" && <span className="muted" style={{ fontSize: 11 }}> · on stock vehicle {dmgOwner.rec.id}</span>}</div></div>
               )}
-              {Object.entries(modal.record).filter(([k, v]) => (k !== "ai" || v) && k !== "damage").map(([k, v]) => (
+              {Object.entries(modal.record).filter(([k, v]) => (k !== "ai" || v) && k !== "damage" && k !== "feedback").map(([k, v]) => (
                 <div className="detail-row" key={k}><span>{k === "ai" ? "AI identification" : k.replace(/([A-Z])/g, " $1")}</span>
                   <div>{k === "ai" ? `${v.make} ${v.model}${v.generation ? ` (${v.generation})` : ""} · ${v.source === "estimate" ? "estimate" : `${Math.round(v.confidence * 100)}% confidence (${v.aiModel || "local AI"})`}` : String(v ?? "")}</div></div>
               ))}
             </div>
             <div className="modal-foot">
               {modal.page === "inventory" && <button className="btn" onClick={() => openMedia(modal.record.id)}><Icon n="spin" s={14} />Manage 360° media</button>}
-              {dmgKey && <button className="btn" onClick={() => openDamage(dmgKey, modal.record.id)}><Icon n="alert" s={14} />Damage inspection</button>}
+              {closedJob ? <button className="btn" onClick={() => openReport(modal.record.id)}><Icon n="reports" s={14} />Job report</button>
+                : dmgKey && <button className="btn" onClick={() => openDamage(dmgKey, modal.record.id)}><Icon n="alert" s={14} />Damage inspection</button>}
               <button className="btn" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
             </div>
           </>
@@ -391,15 +460,20 @@ function LineChart({ rows, series }) {
 }
 
 const REV_SERIES = [{ key: "new", label: "New", color: "#7b73ff" }, { key: "used", label: "Used", color: "#199e70" }];
-function RevenueCard({ go }) {
-  // units sold per month (new, used) × RM 19.2k average
-  const months = [["Nov", 48, 20], ["Dec", 55, 18], ["Jan", 60, 26], ["Feb", 52, 22], ["Mar", 66, 25], ["Apr", 70, 30], ["May", 62, 24], ["Jun", 74, 28], ["Jul", 58, 22], ["Aug", 88, 34], ["Sep", 79, 30], ["Oct", 96, 38]];
-  const rows = months.map(([label, n, u]) => ({ label, new: n * 19.2, used: u * 19.2 }));
+// sample monthly history (units sold, new / used, × RM 19.2k average) and each branch's share of it per month
+const REV_MONTHS = [["Nov", 48, 20], ["Dec", 55, 18], ["Jan", 60, 26], ["Feb", 52, 22], ["Mar", 66, 25], ["Apr", 70, 30], ["May", 62, 24], ["Jun", 74, 28], ["Jul", 58, 22], ["Aug", 88, 34], ["Sep", 79, 30], ["Oct", 96, 38]];
+const branchShare = (branch, i) => {
+  const kl = 0.46 + 0.04 * Math.sin(i * 1.3), pj = 0.32 + 0.03 * Math.cos(i * 0.9);
+  return { "Kuala Lumpur": kl, "Petaling Jaya": pj, "Shah Alam": 1 - kl - pj }[branch] ?? 1;
+};
+
+function RevenueCard({ go, branch }) {
+  const rows = REV_MONTHS.map(([label, n, u], i) => ({ label, new: n * 19.2 * branchShare(branch, i), used: u * 19.2 * branchShare(branch, i) }));
   const [prev, cur] = rows.slice(-2).map((r) => r.new + r.used);
   const change = ((cur - prev) / prev) * 100;
   return (
     <>
-      <DashTitle bold="Revenue" rest="& Sales Statistics" sub="New and used vehicle sales · last 12 months"><MoreBtn label="Open finance" onClick={() => go("finance")} /></DashTitle>
+      <DashTitle bold="Revenue" rest="& Sales Statistics" sub={`New and used vehicle sales · last 12 months · ${branch}`}><MoreBtn label="Open finance" onClick={() => go("finance")} /></DashTitle>
       <section className="card rev-card">
         <div className="rev-head">
           <div>
@@ -416,8 +490,10 @@ function RevenueCard({ go }) {
 }
 
 const BRANCH_MAP = [["Kuala Lumpur", "KL", 58, 40, "#3987e5"], ["Petaling Jaya", "PJ", 40, 62, "#d95926"], ["Shah Alam", "SA", 22, 38, "#199e70"]];
-function BranchNetwork({ db, go }) {
+function BranchNetwork({ db, go, branch, setBranch }) {
   const [hot, setHot] = useState(null);
+  const pick = (name) => setBranch(branch === name ? "All branches" : name);
+  const sel = (name) => (branch === name ? " sel" : "") + (hot === name ? " hot" : "");
   const inStock = db.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status));
   const rows = BRANCH_MAP.map(([name, code, x, y, color]) => {
     const stock = inStock.filter((v) => v.branch === name);
@@ -431,13 +507,13 @@ function BranchNetwork({ db, go }) {
   const hoverProps = (name) => ({ onMouseEnter: () => setHot(name), onMouseLeave: () => setHot(null), onFocus: () => setHot(name), onBlur: () => setHot(null) });
   return (
     <>
-      <DashTitle bold="Branch" rest="Network" sub={`${BRANCHES.length} active branches · Klang Valley`}><MoreBtn label="Open reports" onClick={() => go("reports")} /></DashTitle>
-      <section className="card branch">
+      <DashTitle bold="Branch" rest="Network" sub={`${BRANCHES.length} active branches · click a branch to filter the dashboard`}><MoreBtn label="Open reports" onClick={() => go("reports")} /></DashTitle>
+      <section className={`card branch${branch !== "All branches" ? " has-sel" : ""}`}>
         <div className="map">
           <div className="map-dots" />
           {[[30, 22], [72, 28], [80, 64], [50, 82], [14, 66]].map(([x, y]) => <span key={`${x}${y}`} className="glow" style={{ left: `${x}%`, top: `${y}%` }} />)}
           {rows.map((r) => (
-            <button key={r.name} className={`pin${hot === r.name ? " hot" : ""}`} style={{ left: `${r.x}%`, top: `${r.y}%`, "--pin": r.color }} title={r.name} onClick={() => go("inventory")} {...hoverProps(r.name)}>
+            <button key={r.name} className={`pin${sel(r.name)}`} style={{ left: `${r.x}%`, top: `${r.y}%`, "--pin": r.color }} title={`Filter the dashboard to ${r.name}`} aria-pressed={branch === r.name} onClick={() => pick(r.name)} {...hoverProps(r.name)}>
               <i>{r.code}</i><small>{r.vehicles} vehicle{r.vehicles === 1 ? "" : "s"}</small>
             </button>
           ))}
@@ -445,7 +521,7 @@ function BranchNetwork({ db, go }) {
         <div className="branch-list">
           <div className="br-row h"><span>Branch</span><span>In stock</span><span>Open jobs</span><span>Stock value</span></div>
           {rows.map((r) => (
-            <button key={r.name} className={`br-row${hot === r.name ? " hot" : ""}`} onClick={() => go("inventory")} {...hoverProps(r.name)}>
+            <button key={r.name} className={`br-row${sel(r.name)}`} aria-pressed={branch === r.name} onClick={() => pick(r.name)} {...hoverProps(r.name)}>
               <span className="br-name"><i style={{ background: r.color }} />{r.name}</span>
               <span>{r.vehicles} vehicle{r.vehicles === 1 ? "" : "s"}</span>
               <span>{r.jobs} job{r.jobs === 1 ? "" : "s"}</span>
@@ -497,13 +573,13 @@ function FeaturedVehicle({ db, go, onAction, settings, openMedia, saveAi, toast 
   );
 }
 
-function TopConsultants({ db, go }) {
+function TopConsultants({ db, go, scope = "all branches" }) {
   const by = {};
   db.sales.filter((s) => s.status !== "Cancelled").forEach((s) => { by[s.consultant] = by[s.consultant] || { n: 0, v: 0 }; by[s.consultant].n++; by[s.consultant].v += s.amount; });
   const rows = Object.entries(by).sort((a, b) => b[1].v - a[1].v);
   return (
     <section className="card">
-      <div className="card-head"><div><h3>Top Consultants</h3><p>By order value · all branches</p></div></div>
+      <div className="card-head"><div><h3>Top Consultants</h3><p>By order value · {scope}</p></div></div>
       <div className="agents">
         <div className="ag-row h"><span>Consultant</span><span>Orders</span><span>Value</span></div>
         {rows.slice(0, 4).map(([name, s], k) => (
@@ -518,72 +594,104 @@ function TopConsultants({ db, go }) {
   );
 }
 
-function Dashboard({ db, go, onAction, openForm, exportCurrent, toast, settings, openMedia, saveAi }) {
-  const completed = db.sales.filter((s) => s.status === "Completed");
-  const revenue = completed.reduce((a, s) => a + s.amount, 0) + db.sales.filter((s) => s.status !== "Quotation").reduce((a, s) => a + s.amount * 0.45, 0);
+/** The records for one branch. Sales and warranties belong to their customer's branch; parts are shared stock. */
+function branchView(db, branch) {
+  if (branch === "All branches") return db;
+  const home = new Map(db.customers.map((c) => [c.name, c.branch]));
+  const here = (r) => r.branch === branch, customerHere = (r) => home.get(r.customer) === branch;
+  return { ...db, vehicles: db.vehicles.filter(here), customers: db.customers.filter(here), jobs: db.jobs.filter(here), sales: db.sales.filter(customerHere), warranties: db.warranties.filter(customerHere) };
+}
+const ALERT_ICON = { jobs: "wrench", sales: "sales", parts: "box", warranties: "shield", vehicles: "car" };
+const PRIORITY = { high: 0, normal: 1, low: 2 };
+
+function Dashboard({ db, go, onAction, openForm, downloadCsv, toast, settings, openMedia, saveAi, branch, setBranch }) {
+  const view = branchView(db, branch);
+  const all = branch === "All branches", scope = all ? "all branches" : branch;
+
+  const now = new Date(), month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const monthName = now.toLocaleDateString("en-GB", { month: "long" });
+  const inStock = view.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status));
+  const sold = view.sales.filter((s) => s.date?.startsWith(month) && ["Delivery Prep", "Completed"].includes(s.status));
+  const revenue = sold.reduce((a, s) => a + s.amount, 0);
+  // profit against the stock vehicle's purchase cost; vehicles no longer in stock assume a 15% margin
+  const costOf = (s) => db.vehicles.find((v) => `${v.brand} ${v.model}` === s.vehicle)?.cost ?? s.amount * 0.85;
+  const profit = sold.reduce((a, s) => a + s.amount - costOf(s), 0);
+  const delivering = view.sales.filter((s) => ["Awaiting Payment", "Delivery Prep"].includes(s.status));
+  const openJobs = view.jobs.filter((j) => j.status !== "Completed");
+  const today = `${month}-${String(now.getDate()).padStart(2, "0")}`; // local date (toISOString would be UTC)
+  const flagged = openJobs.filter((j) => ["Waiting for Parts", "Awaiting Customer Approval"].includes(j.status) || (j.due < today && j.status !== "Ready for Collection")).length;
   const lowParts = db.parts.filter((p) => p.qty < p.min);
-  const low = lowParts.length;
-  const jobCount = (st) => db.jobs.filter((j) => j.status === st).length;
+  const owing = view.sales.filter((s) => ["Pending", "Deposit Paid", "Overdue"].includes(s.payment) && s.status !== "Cancelled");
+  const overdue = owing.filter((s) => s.payment === "Overdue").length;
+
+  const jobCount = (st) => view.jobs.filter((j) => j.status === st).length;
   const jobBars = [["In Progress", "#6c63ff"], ["Waiting for Parts", "#f2b552"], ["Quality Check", "#5fd38d"], ["Awaiting Customer Approval", "#68a2ff", "Awaiting Approval"]];
-  const end = new Date(), start = new Date(end.getTime() - 6 * 864e5);
+  const alerts = buildNotifications(view).filter((n) => n.priority !== "low").sort((a, b) => PRIORITY[a.priority] - PRIORITY[b.priority] || b.at - a.at);
+  const recentSales = [...view.sales].sort((a, b) => b.date.localeCompare(a.date));
+  const activity = [
+    ...view.sales.map((s) => ({ id: s.id, key: "sales", icon: "sales", day: s.date, title: `${s.id} · ${s.status}`, text: `${s.customer} · ${s.vehicle}`, by: s.consultant })),
+    ...view.jobs.map((j) => ({ id: j.id, key: "jobs", icon: "wrench", day: j.due, title: `${j.id} · ${j.status}`, text: `${j.service} · ${j.customer}`, by: j.technician })),
+  ].filter((a) => a.day <= today).sort((a, b) => b.day.localeCompare(a.day)).slice(0, 4);
+  const start = new Date(now.getTime() - 6 * 864e5);
+
   return (
     <>
-      <DashTitle bold="Weekly" rest="Overview" sub={`${fmtDay(start)} – ${fmtDay(end)}`}>
-        <select className="select filter-select" onChange={(e) => toast("Dashboard branch filter selected: " + e.target.value)}><option>All branches</option>{BRANCHES.map((b) => <option key={b}>{b}</option>)}</select>
-        <button className="btn" onClick={exportCurrent}><Icon n="download" s={14} />Export</button>
+      <DashTitle bold="Weekly" rest="Overview" sub={`${fmtDay(start)} – ${fmtDay(now)} · ${all ? "All branches" : branch}`}>
+        <select className={`select filter-select${all ? "" : " active"}`} value={branch} onChange={(e) => setBranch(e.target.value)} aria-label="Filter the dashboard by branch"><option>All branches</option>{BRANCHES.map((b) => <option key={b}>{b}</option>)}</select>
+        <button className="btn" onClick={() => downloadCsv(all ? "dashboard-sales" : `dashboard-sales-${branch.toLowerCase().replace(/\s+/g, "-")}`, view.sales)}><Icon n="download" s={14} />Export</button>
         <button className="btn primary" onClick={() => openForm("sales")}><Icon n="plus" s={14} w={2.2} />New order</button>
       </DashTitle>
       <div className="grid ov-grid">
         {[
-          { label: "Vehicles in Stock", icon: "car", value: db.vehicles.filter((v) => !["Sold", "Delivered"].includes(v.status)).length, delta: "8.2%", page: "inventory" },
-          { label: "Units Sold · MTD", icon: "sales", value: completed.length + 12, delta: "12.5%", page: "sales" },
-          { label: "Sales Revenue", icon: "wallet", value: money(revenue + 1840000), delta: "9.4%", page: "finance" },
-          { label: "Gross Profit", icon: "reports", value: money(386400), delta: "2.1%", down: true, page: "finance" },
-          { label: "Pending Deliveries", icon: "calendar", value: db.sales.filter((s) => s.status !== "Completed").length, foot: "2 today|scheduled", page: "sales" },
-          { label: "Active Service Orders", icon: "wrench", value: db.jobs.filter((j) => j.status !== "Completed").length, foot: "2 flagged|need attention", page: "service" },
-          { label: "Parts Stock Value", icon: "box", value: money(db.parts.reduce((a, p) => a + p.qty * p.cost, 0)), foot: `${low} low|below minimum`, page: "parts" },
-          { label: "Outstanding Payments", icon: "clock", value: money(db.sales.filter((s) => s.payment !== "Paid").reduce((a, s) => a + s.amount, 0)), foot: "3 invoices|to follow up", page: "finance" },
-        ].map(({ page, ...c }, i) => <OvCell key={c.label} {...c} tone={OV_TONES[i % OV_TONES.length]} onMore={() => go(page)} />)}
+          { label: "Vehicles in Stock", icon: "car", value: inStock.length, foot: `${inStock.filter((v) => v.status === "Available").length} available|for sale`, page: "inventory" },
+          { label: "Units Sold · MTD", icon: "sales", value: sold.length, foot: `${sold.filter((s) => s.status === "Completed").length} handed over|in ${monthName}`, page: "sales" },
+          { label: "Sales Revenue · MTD", icon: "wallet", value: money(revenue), foot: `${plural(sold.length, "order")}|in ${monthName}`, page: "finance" },
+          { label: "Gross Profit · MTD", icon: "reports", value: money(profit), foot: `${revenue ? Math.round((profit / revenue) * 100) : 0}% margin|estimated`, page: "finance" },
+          { label: "Pending Deliveries", icon: "calendar", value: delivering.length, foot: `${delivering.filter((s) => s.status === "Delivery Prep").length} in prep|awaiting handover`, page: "sales" },
+          { label: "Active Service Orders", icon: "wrench", value: openJobs.length, foot: `${flagged} flagged|need attention`, page: "service" },
+          { label: "Parts Stock Value", icon: "box", value: money(db.parts.reduce((a, p) => a + p.qty * p.cost, 0)), foot: `${lowParts.length} low|shared by all branches`, page: "parts" },
+          { label: "Outstanding Payments", icon: "clock", value: money(owing.reduce((a, s) => a + s.amount, 0)), foot: `${plural(owing.length, "invoice")}|${overdue} overdue`, page: "finance" },
+        ].map(({ page, ...c }, i) => <OvCell key={c.label} {...c} tone={OV_TONES[i % OV_TONES.length]} onMore={() => go(page, "", !all && ["inventory", "service"].includes(page) ? { branch } : {})} />)}
       </div>
 
-      <RevenueCard go={go} />
-      <BranchNetwork db={db} go={go} />
+      <RevenueCard go={go} branch={branch} />
+      <BranchNetwork db={db} go={go} branch={branch} setBranch={setBranch} />
 
       <div className="grid row2" style={{ marginTop: 24 }}>
         <div className="grid col-stack">
           <section className="card">
-            <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers across all branches</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
-            <DataTable rows={db.sales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
+            <div className="card-head"><div><h3>Recent Sales Orders</h3><p>Latest bookings and handovers · {scope}</p></div><button className="mini-btn" onClick={() => go("finance")}>View all <Icon n="arrow" s={11} /></button></div>
+            <DataTable rows={recentSales.slice(0, 4)} cols={["Vehicle", "Customer", "Amount", "Status"]} type="sales" onAction={onAction} compact />
           </section>
-          <TopConsultants db={db} go={go} />
+          <TopConsultants db={view} go={go} scope={scope} />
         </div>
-        <FeaturedVehicle db={db} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
+        <FeaturedVehicle key={branch} db={view} go={go} onAction={onAction} settings={settings} openMedia={openMedia} saveAi={saveAi} toast={toast} />
       </div>
 
       <div className="grid tri">
         <section className="card">
-          <div className="card-head"><div><h3>Workshop Job Status</h3><p>Active repair orders</p></div><button className="mini-btn" onClick={() => go("service")}>Board <Icon n="arrow" s={11} /></button></div>
-          <div className="card-body"><Bars items={jobBars.map(([st, color, label]) => ({ label: label || st, right: `${jobCount(st)} jobs`, pct: Math.max(8, jobCount(st) * 24), color }))} /></div>
+          <div className="card-head"><div><h3>Workshop Job Status</h3><p>Active repair orders · {scope}</p></div><button className="mini-btn" onClick={() => go("service", "", all ? {} : { branch })}>Board <Icon n="arrow" s={11} /></button></div>
+          <div className="card-body"><Bars items={jobBars.map(([st, color, label]) => ({ label: label || st, right: plural(jobCount(st), "job"), pct: jobCount(st) ? Math.max(8, (jobCount(st) / Math.max(1, ...jobBars.map(([s]) => jobCount(s)))) * 100) : 0, color }))} /></div>
         </section>
         <section className="card">
-          <div className="card-head"><div><h3>Operational Alerts</h3><p>Items that may need attention</p></div><span className="status s-amber">{low + 3} alerts</span></div>
+          <div className="card-head"><div><h3>Operational Alerts</h3><p>Items that need attention · {scope}</p></div><span className="status s-amber">{plural(alerts.length, "alert")}</span></div>
           <div className="card-body"><div className="alert-list">
-            {[["alert", "Low parts stock", low ? lowParts.map((p) => p.name).join(", ") : "Brake pad and air filter stock should be reviewed."],
-              ["clock", "Customer approval pending", "RO-6214 · Hybrid system diagnosis"],
-              ["car", "Delivery preparation", "SO-2026-1042 · Handover in progress"],
-              ["shield", "Warranty expiring soon", "1 warranty expires within 60 days"]].map(([m, t, d]) => (
-              <div className="alert" key={t}><div className="alert-mark"><Icon n={m} s={14} /></div><div><b>{t}</b><p>{d}</p></div></div>
-            ))}
+            {alerts.length ? alerts.slice(0, 4).map((n) => (
+              <button className={`alert alert-${n.tone}`} key={n.id} onClick={() => onAction("view", n.link.key, n.link.id)}>
+                <div className="alert-mark"><Icon n={ALERT_ICON[n.link.key] || "alert"} s={14} /></div>
+                <div><b>{n.title}</b><p>{n.reason} · {n.from}</p></div>
+              </button>
+            )) : <p className="muted" style={{ fontSize: 12, margin: 0 }}>Nothing needs attention right now.</p>}
           </div></div>
         </section>
         <section className="card">
-          <div className="card-head"><div><h3>Recent Activity</h3><p>Updates from your team</p></div></div>
+          <div className="card-head"><div><h3>Recent Activity</h3><p>Latest updates · {scope}</p></div></div>
           <div className="card-body activity">
-            {[["sales", "Sales order SO-2026-1042 updated", "Delivery preparation started for Amelia Tan", "Today, 10:42 AM · Daniel Wong"],
-              ["box", "Parts inventory reviewed", "Weekly stock count — Kuala Lumpur", "Today, 9:18 AM · Parts Team"],
-              ["wrench", "Repair order RO-6216 moved to QC", "Periodic maintenance completed", "Yesterday, 4:35 PM · Arif Hassan"]].map(([i, t, p, tm]) => (
-              <div className="activity-item" key={t}><div className="activity-icon"><Icon n={i} s={14} /></div><div><b>{t}</b><p>{p}</p><time>{tm}</time></div></div>
-            ))}
+            {activity.length ? activity.map((a) => (
+              <button className="activity-item" key={a.key + a.id} onClick={() => onAction("view", a.key, a.id)}>
+                <div className="activity-icon"><Icon n={a.icon} s={14} /></div><div><b>{a.title}</b><p>{a.text}</p><time>{fmtDay(new Date(`${a.day}T00:00`))} · {a.by}</time></div>
+              </button>
+            )) : <p className="muted" style={{ fontSize: 12, margin: 0 }}>No recent activity.</p>}
           </div>
         </section>
       </div>
@@ -594,7 +702,7 @@ function Dashboard({ db, go, onAction, openForm, exportCurrent, toast, settings,
 /* ───────────────────────── Module pages ───────────────────────── */
 function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMode, setViewMode, onAction, openForm, exportCurrent, settings, openMedia }) {
   const c = CONFIG[page], pageSize = 6, rows = db[c.key];
-  const filtered = rows.filter((r) => matches(r, filters.search) && (!filters.status || r.status === filters.status) && (filters.branch === "All branches" || r.branch === filters.branch));
+  const filtered = rows.filter((r) => passes(r, filters));
   const slice = filtered.slice((pageNum - 1) * pageSize, pageNum * pageSize);
   const statuses = page === "inventory" ? CONFIG.inventory.fields.find((f) => f[0] === "status")[3] : [...new Set(rows.map((r) => r.status))].filter(Boolean);
   const setF = (patch) => { setFilters((f) => ({ ...f, ...patch })); setPageNum(1); };
@@ -652,6 +760,7 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
           <select className="select filter-select" value={filters.branch} onChange={(e) => setF({ branch: e.target.value })}>
             <option>All branches</option>{BRANCHES.map((x) => <option key={x}>{x}</option>)}
           </select>
+          {filters.low && <button className="filter-chip" onClick={() => setF({ low: false })} aria-label="Remove low stock filter">Low stock only <span aria-hidden="true">×</span></button>}
           {page === "inventory" && <button className="btn" onClick={() => setViewMode("cards")}><Icon n="dashboard" s={14} />Card view</button>}
         </div>
         <DataTable rows={slice} cols={c.cols} type={c.key} onAction={onAction} />
@@ -745,7 +854,7 @@ function ReportsPage({ db, go, exportCurrent }) {
       <section className="card" style={{ marginTop: 14 }}>
         <div className="card-head"><div><h3>Inventory snapshot by branch</h3><p>Vehicle count and listed selling value</p></div></div>
         <div className="card-body">
-          <Bars items={BRANCHES.map((b) => { const vs = db.vehicles.filter((v) => v.branch === b); return { label: b, right: `${vs.length} vehicles · ${money(vs.reduce((a, v) => a + v.price, 0))}`, pct: Math.max(4, (vs.length / 6) * 100) }; })} />
+          <Bars items={BRANCHES.map((b) => { const vs = db.vehicles.filter((v) => v.branch === b), most = Math.max(1, ...BRANCHES.map((x) => db.vehicles.filter((v) => v.branch === x).length)); return { label: b, right: `${plural(vs.length, "vehicle")} · ${money(vs.reduce((a, v) => a + v.price, 0))}`, pct: Math.max(4, (vs.length / most) * 100) }; })} />
         </div>
       </section>
     </>
@@ -835,8 +944,64 @@ function SettingsPage({ toast, resetDemo, settings, setSettings, db, openMedia }
   );
 }
 
+/* ───────────────────────── Global search index ───────────────────────── */
+const PAGE_HINTS = {
+  dashboard: ["Weekly overview, revenue and branch network", "home overview kpi revenue statistics branch network map latest inventory"],
+  inventory: ["Vehicle stock, 360° media and AI identification", "vehicles cars stock vin 360 3d photos"],
+  sales: ["Sales pipeline from enquiry to delivery", "pipeline orders deals quotation kanban stage advance"],
+  customers: ["Individual, corporate and fleet customers", "crm clients contacts fleet corporate lifetime value"],
+  service: ["Repair orders and technician workload", "workshop repair orders jobs technician service maintenance"],
+  parts: ["Parts stock, suppliers and low-stock items", "spare parts stock sku supplier low stock replenish"],
+  warranty: ["Coverage, expiry dates and claims", "warranty claims coverage expiry"],
+  finance: ["Recorded sales and outstanding payments", "payments invoices outstanding ledger transactions margin"],
+  reports: ["Performance reports, export and print", "analytics reports export print"],
+  settings: ["Users, preferences, imagery and local AI", "admin administration users roles preferences currency imagery ollama ai reset"],
+};
+const LIST_NOUN = { inventory: "Vehicles", customers: "Customers", service: "Repair orders", warranty: "Warranties" };
+const RECORD_GROUPS = [
+  ["vehicles", "Vehicles", "car", (r) => `${r.brand} ${r.model}`, (r) => [r.id, r.reg || r.vin, r.branch, r.status].filter(Boolean).join(" · ")],
+  ["customers", "Customers", "users", (r) => r.name, (r) => [r.id, r.type, r.phone].filter(Boolean).join(" · ")],
+  ["sales", "Sales orders", "sales", (r) => `${r.id} · ${r.customer}`, (r) => `${r.vehicle} · ${money(r.amount)} · ${r.status}`],
+  ["jobs", "Repair orders", "wrench", (r) => `${r.id} · ${r.service}`, (r) => `${r.customer} · ${r.vehicle} · ${r.status}`],
+  ["parts", "Parts", "box", (r) => r.name, (r) => `${r.sku} · ${r.qty} in stock${r.qty < r.min ? " (low)" : ""} · ${r.location}`],
+  ["warranties", "Warranties", "shield", (r) => `${r.id} · ${r.customer}`, (r) => `${r.vehicle} · expires ${r.expiry} · ${r.status}`],
+];
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+/** Everything the top-bar search can find: pages, actions, filtered lists and records. */
+function buildSearchIndex({ db, go, openForm, onAction, downloadCsv, resetDemo, reload }) {
+  const out = [];
+  [...NAV_MAIN, ...NAV_INSIGHTS].forEach(([p, icon, label]) =>
+    out.push({ id: `page-${p}`, group: "Pages", icon, title: label, sub: PAGE_HINTS[p][0], keys: `${TITLES[p]} ${PAGE_HINTS[p][1]}`, kind: "Page", run: () => go(p) }));
+
+  Object.entries(CONFIG).forEach(([p, c]) => {
+    out.push({ id: `add-${p}`, group: "Actions", icon: "plus", title: c.add[0].toUpperCase() + c.add.slice(1), sub: `New record in ${c.title}`, keys: "new create add", kind: "Action", suggest: ["inventory", "sales", "service"].includes(p), run: () => openForm(p) });
+    out.push({ id: `csv-${p}`, group: "Actions", icon: "download", title: `Export ${c.title} to CSV`, sub: plural(db[c.key].length, "record"), keys: "export download csv excel spreadsheet", kind: "Action", run: () => downloadCsv(p, db[c.key]) });
+  });
+  out.push(
+    { id: "ai", group: "Actions", icon: "spark", title: "Vehicle imagery & local AI", sub: "IMAGIN renders, Ollama model, test the AI connection", keys: "ai ollama qwen identify scan photo 360 3d render imagin settings test", kind: "Settings", run: () => go("settings") },
+    { id: "print", group: "Actions", icon: "print", title: "Print report", sub: "Reports & Analytics", keys: "print pdf report", kind: "Action", run: () => { go("reports"); setTimeout(() => window.print(), 300); } },
+    { id: "reload", group: "Actions", icon: "arrow", title: "Reload data from the database", sub: "MongoDB sync", keys: "reload refresh sync mongodb database reconnect", kind: "Action", run: reload },
+    { id: "reset", group: "Actions", icon: "trash", title: "Reset sample data", sub: "Restore the original demo records", keys: "reset demo restore default seed", kind: "Action", run: resetDemo },
+  );
+
+  Object.entries(LIST_NOUN).forEach(([p, noun]) => {
+    const c = CONFIG[p], rows = db[c.key], count = (f) => rows.filter(f).length;
+    [...new Set(rows.map((r) => r.status))].filter(Boolean).forEach((s) =>
+      out.push({ id: `list-${p}-${s}`, group: "Lists", icon: "filter", title: `${noun} · ${s}`, sub: `${plural(count((r) => r.status === s), "record")} in ${c.title}`, keys: `list status filter ${c.title}`, kind: "List", run: () => go(p, "", { status: s }) }));
+    BRANCHES.filter((b) => rows.some((r) => r.branch === b)).forEach((b) =>
+      out.push({ id: `list-${p}-${b}`, group: "Lists", icon: "pin", title: `${noun} in ${b}`, sub: `${plural(count((r) => r.branch === b), "record")} in ${c.title}`, keys: `list branch filter ${c.title}`, kind: "List", run: () => go(p, "", { branch: b }) }));
+  });
+  const low = db.parts.filter((x) => x.qty < x.min);
+  if (low.length) out.push({ id: "list-low", group: "Lists", icon: "alert", title: "Parts · Low stock", sub: low.map((x) => x.name).join(", "), keys: "list low stock below minimum reorder replenish", kind: "List", run: () => go("parts", "", { low: true }) });
+
+  RECORD_GROUPS.forEach(([key, group, icon, title, sub]) => db[key].forEach((r) =>
+    out.push({ id: `${key}-${r.id}`, group, icon, title: title(r), sub: sub(r), keys: Object.values(r).filter((v) => v != null && typeof v !== "object").join(" "), kind: "Open", run: () => onAction("view", key, r.id) })));
+  return out;
+}
+
 /* ───────────────────────── App ───────────────────────── */
-const NO_FILTERS = { search: "", status: "", branch: "All branches" };
+const NO_FILTERS = { search: "", status: "", branch: "All branches", low: false };
 
 export default function App() {
   const [db, setDb] = useState(loadDb);
@@ -844,8 +1009,8 @@ export default function App() {
   const [filters, setFilters] = useState(NO_FILTERS);
   const [pageNum, setPageNum] = useState(1);
   const [viewMode, setViewMode] = useState("table");
+  const [dashBranch, setDashBranch] = useState("All branches");
   const [modal, setModal] = useState(null);
-  const [globalQ, setGlobalQ] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
   const [settings, setSettingsState] = useState(loadSettings);
@@ -925,7 +1090,7 @@ export default function App() {
   }, []);
 
   const toast = (msg) => { setToastMsg(msg); clearTimeout(timer.current); timer.current = setTimeout(() => setToastMsg(""), 2600); };
-  const go = (p, search = "") => { setPage(p); setPageNum(1); setFilters({ ...NO_FILTERS, search }); setGlobalQ(""); setMenuOpen(false); window.scrollTo?.(0, 0); };
+  const go = (p, search = "", extra = {}) => { setPage(p); setPageNum(1); setFilters({ ...NO_FILTERS, search, ...extra }); setMenuOpen(false); window.scrollTo?.(0, 0); };
 
   const openForm = (p, record = null) => setModal({ kind: "form", page: p, record });
   const openMedia = (id) => setModal({ kind: "media", page: "inventory", id });
@@ -944,6 +1109,7 @@ export default function App() {
   const onAction = (action, key, id) => {
     const r = db[key]?.find((x) => x.id === id);
     if (!r) return;
+    if (action === "report" || ((action === "edit" || action === "damage") && isClosedJob(key, r))) return setModal({ kind: "report", page: "service", id });
     if (action === "view") return setModal({ kind: "view", page: pageForKey(key), record: r });
     if (action === "edit") return openForm(pageForKey(key), r);
     if (action === "media") return openMedia(id);
@@ -995,15 +1161,16 @@ export default function App() {
 
   const exportCurrent = () => {
     const c = CONFIG[page];
-    const rows = c ? db[c.key].filter((r) => matches(r, filters.search) && (!filters.status || r.status === filters.status) && (filters.branch === "All branches" || r.branch === filters.branch))
-      : page === "reports" ? db.vehicles : db.sales;
+    downloadCsv(page, c ? db[c.key].filter((r) => passes(r, filters)) : page === "reports" ? db.vehicles : db.sales);
+  };
+  const downloadCsv = (name, rows) => {
     if (!rows.length) return toast("No records available to export.");
     const keys = [...new Set(rows.flatMap(Object.keys))];
     const cell = (x) => (x && typeof x === "object" ? JSON.stringify(x) : String(x ?? ""));
     const csv = [keys.join(","), ...rows.map((r) => keys.map((k) => `"${cell(r[k]).replace(/"/g, '""')}"`).join(","))].join("\r\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
-    a.download = `autocore-${page}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `autocore-${name}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
     toast("CSV export generated.");
@@ -1015,26 +1182,21 @@ export default function App() {
     toast("Sample data reset.");
   };
 
-  const globalSearch = (e) => {
-    if (e.key !== "Enter") return;
-    const q = globalQ.trim();
-    if (!q) return;
-    const found = [["vehicles", "inventory"], ["customers", "customers"], ["sales", "sales"], ["jobs", "service"], ["parts", "parts"], ["warranties", "warranty"]].find(([k]) => db[k].some((r) => matches(r, q)));
-    // The sales page is a pipeline board (no search box), so route sales hits to the Finance table instead.
-    found ? go(found[1] === "sales" ? "finance" : found[1], q) : toast("No matching record found in the sample workspace.");
-  };
+  const searchEntries = buildSearchIndex({ db, go, openForm, onAction, downloadCsv, resetDemo, reload: conn === "online" ? refresh : connect });
 
   const common = { db, go, onAction, openForm, exportCurrent, toast, settings, openMedia, saveAi };
   let body;
-  if (page === "dashboard") body = <Dashboard {...common} />;
+  if (page === "dashboard") body = <Dashboard {...common} downloadCsv={downloadCsv} branch={dashBranch} setBranch={setDashBranch} />;
   else if (page === "sales") body = <SalesPipeline {...common} />;
   else if (page === "finance") body = <FinancePage {...common} />;
   else if (page === "reports") body = <ReportsPage {...common} />;
   else if (page === "settings") body = <SettingsPage toast={toast} resetDemo={resetDemo} settings={settings} setSettings={setSettings} db={db} openMedia={openMedia} />;
   else body = <ModulePage page={page} {...common} filters={filters} setFilters={setFilters} pageNum={pageNum} setPageNum={setPageNum} viewMode={viewMode} setViewMode={setViewMode} />;
 
-  const NavBtn = ([p, ico, label, count]) => (
-    <button key={p} className={page === p ? "active" : ""} onClick={() => go(p)}>
+  // Workshop badge: repair orders held up on parts or the customer's approval
+  const badges = { service: db.jobs.filter((j) => ["Waiting for Parts", "Awaiting Customer Approval"].includes(j.status)).length };
+  const NavBtn = ([p, ico, label, count = badges[p]]) => (
+    <button key={p} className={page === p ? "active" : ""} onClick={() => go(p)} title={p === "service" && count ? plural(count, "repair order") + " waiting on parts or approval" : undefined}>
       <span className="ico"><Icon n={ico} s={16} /></span>{label}{count ? <span className="count">{count}</span> : null}
     </button>
   );
@@ -1046,14 +1208,14 @@ export default function App() {
           <button className="icon-btn mobile-menu" onClick={() => setMenuOpen((o) => !o)} aria-label="Open menu"><Icon n="menu" s={17} /></button>
           <div className="brand"><div className="logo"><Logo /></div><b>AUTOCORE</b></div>
           <div className="crumb">Workspace&nbsp; / &nbsp;<span>{TITLES[page]}</span></div>
-          <div className="top-search"><span className="si"><Icon n="search" s={14} /></span><input value={globalQ} onChange={(e) => setGlobalQ(e.target.value)} onKeyDown={globalSearch} placeholder="Search here" aria-label="Global search" /></div>
+          <GlobalSearch entries={searchEntries} />
           <div className="top-actions">
             <button className={`db-chip ${conn}`} onClick={conn === "online" ? refresh : connect} disabled={conn === "connecting"}
               title={{ online: "Records are saved in MongoDB. Click to reload.", connecting: "Connecting to the database…", offline: "The database server isn't reachable. Changes are kept in this browser. Click to retry.", error: "The last change couldn't be saved to MongoDB. Click to retry." }[conn]}>
               <i />{{ online: "MongoDB", connecting: "Connecting…", offline: "Offline", error: "Not saved" }[conn]}
             </button>
             <button className="icon-btn hide-sm" title="Administration" onClick={() => go("settings")}><Icon n="settings" s={16} /></button>
-            <button className="icon-btn" title="Notifications" onClick={() => toast("You have 4 operational alerts. See Operational Alerts on the dashboard.")}><Icon n="bell" s={16} /><i className="dot" /></button>
+            <Notifications db={db} toast={toast} onOpen={(link) => onAction("view", link.key, link.id)} />
             <div className="avatar">JL</div><div className="user">Jordan Lee<small>Dealer Principal</small></div>
           </div>
         </header>
@@ -1073,7 +1235,7 @@ export default function App() {
         </div>
       </div>
 
-      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} onSaveDamage={saveDamage} openMedia={openMedia} openDamage={openDamage} toast={toast} go={go} />
+      <Modal key={modal ? `${modal.kind}-${modal.page}-${modal.record?.id ?? modal.id ?? "new"}` : "none"} modal={modal} db={db} settings={settings} onClose={() => setModal(null)} onSave={saveRecord} onSaveMedia={saveMedia} onSaveDamage={saveDamage} openMedia={openMedia} openDamage={openDamage} openReport={(id) => onAction("report", "jobs", id)} toast={toast} go={go} />
       <div className={`toast ${toastMsg ? "show" : ""}`} role="status">{toastMsg}</div>
     </div>
   );
