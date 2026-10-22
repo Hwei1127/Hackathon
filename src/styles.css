@@ -339,3 +339,9 @@ model-viewer{--progress-bar-color:var(--accent)}
   .rev-pane{min-height:260px}
 }
 summary.media-h{cursor:pointer;list-style:none}summary.media-h::-webkit-details-marker{display:none}
+/* database connection */
+.db-chip{display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 11px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--muted);font-size:11px;font-weight:500;white-space:nowrap}
+.db-chip:hover:not(:disabled){color:var(--text);border-color:var(--line2)}.db-chip:disabled{cursor:default}
+.db-chip i{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.db-chip.online i{background:var(--green)}.db-chip.connecting i{background:var(--amber)}.db-chip.offline i,.db-chip.error i{background:var(--red)}
+.db-chip.error{color:var(--red)}

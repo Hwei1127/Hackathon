@@ -1,17 +1,40 @@
 # AutoCore DMS
 
-Dealer management system demo (React + Vite): vehicle inventory, sales pipeline, customers, workshop, spare parts, warranty, finance, reports and administration.
+Dealer management system demo (React + Vite, with an Express + MongoDB API): vehicle inventory, sales pipeline, customers, workshop, spare parts, warranty, finance, reports and administration.
 
 ## Run it
 
-Requires Node.js 18 or newer.
+Requires Node.js 18 or newer and MongoDB (Community Server, running locally on the default port 27017).
 
 ```bash
 npm install
-npm run dev
+npm run dev        # starts the API (port 4000) and the web app together
 ```
 
-Open the URL Vite prints (usually http://localhost:5173).
+Open the URL Vite prints (usually http://localhost:5173). The chip at the top right shows the database connection.
+
+## Database (MongoDB)
+
+`server/index.js` is a small Express API over the `autocore` database. Each record type is its own collection:
+`vehicles`, `customers`, `sales`, `jobs` (repair orders), `parts` and `warranties`. The record's `id` is its `_id`;
+a vehicle's AI identification and damage map are stored on the vehicle document.
+
+- On first start, an empty database is seeded with the sample records in `src/data/seed.js`.
+- The app loads every collection at start-up and sends each change as it happens (only the records that changed), and reloads when you come back to the tab, so several browsers share the same data.
+- If the API or MongoDB can't be reached, the chip shows **Offline** and changes are kept in the browser; they're sent the next time it connects.
+- VINs and part numbers are unique (MongoDB indexes).
+
+| Setting | Default |
+|---|---|
+| `MONGODB_URI` | `mongodb://127.0.0.1:27017` |
+| `MONGODB_DB` | `autocore` |
+| `PORT` (API) | `4000` |
+| `VITE_API_URL` (web app, build time) | `/api` (proxied to port 4000 by Vite) |
+
+API: `GET /api/health`, `GET /api/db` (everything), `GET /api/:collection`, `GET /api/:collection/:id`,
+`PATCH /api/:collection` with `{ upsert: [records], delete: [ids], order: [ids] }`.
+
+Run the parts separately with `npm run server` and `npm run web`.
 
 ## Build for production
 
@@ -20,7 +43,7 @@ npm run build     # outputs to dist/
 npm run preview   # serve the built app locally
 ```
 
-`dist/` is a static site and can be hosted on Netlify, Vercel, GitHub Pages or any web server.
+`dist/` is a static site; serve it alongside the API (`npm run server`) with `/api` routed to it, or build with `VITE_API_URL` pointing at the API.
 
 ## 360° vehicle viewer
 
@@ -62,29 +85,36 @@ The AI runs locally with [Ollama](https://ollama.com): no API key, no cost per r
 autocore-dms/
 ├── index.html          # HTML entry
 ├── package.json
-├── vite.config.js
+├── vite.config.js      # also proxies /api to the API in development
+├── server/
+│   └── index.js        # Express + MongoDB API
 ├── public/
 │   ├── favicon.svg
 │   └── media/          # hosted 360° photos and 3D models (see README inside)
 └── src/
     ├── main.jsx                    # mounts <App />, loads styles
-    ├── App.jsx                     # pages, sample data, app state
+    ├── App.jsx                     # pages, app state, database sync
+    ├── data/seed.js                # sample records (database seed / offline fallback)
     ├── styles.css                  # dark theme
     ├── components/
     │   ├── Vehicle360.jsx          # viewer: 3D → photos → renders → illustration
     │   ├── MediaManager.jsx        # per-vehicle upload / links panel
     │   ├── AiIdentify.jsx          # dashboard AI identification strip
+    │   ├── DamageInspector.jsx     # damage map on the 3D model
     │   ├── CarArt.jsx              # body-type illustrations
     │   └── Icon.jsx                # icon set
     └── lib/
         ├── vehicleMedia.js         # body type, IMAGIN URLs, IndexedDB storage
-        ├── carAI.js                # Claude vehicle identification
+        ├── api.js                  # API client + change diffing
+        ├── damage.js               # damage parts, severities, offline text reader
+        ├── carAI.js                # local-AI vehicle identification and damage assessment
         └── car3d.js                # procedural 3D car → .glb
 ```
 
 ## Notes
 
 - Uploaded 360° media can be removed in **Administration → Clear uploaded media**.
-- Data is stored in the browser's localStorage (key `autocore-db-v1`). Use **Administration → Reset sample data** to restore the defaults.
-- There is no backend, login or multi-user sync; this is a front-end demo.
+- Records live in MongoDB, with a copy in the browser's localStorage (key `autocore-db-v1`). **Administration → Reset sample data** restores the defaults in the database too.
+- Uploaded 360° photos and 3D files are still stored in each browser (IndexedDB), not in MongoDB.
+- There is no login or role enforcement on the API; don't expose it beyond your own machine or network.
 - The Sora font loads from Google Fonts; without internet the app falls back to the system font.

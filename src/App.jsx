@@ -5,6 +5,8 @@ import MediaManager, { VehicleMediaForm } from "./components/MediaManager.jsx";
 import AiIdentify from "./components/AiIdentify.jsx";
 import DamageInspector from "./components/DamageInspector.jsx";
 import { damageSummary, damagedParts } from "./lib/damage.js";
+import { INITIAL } from "./data/seed.js";
+import { api, diffDb } from "./lib/api.js";
 import { BODY_TYPES, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
 
 /* ───────────────────────── Data ───────────────────────── */
@@ -12,47 +14,6 @@ const KEY = "autocore-db-v1";
 const BRANCHES = ["Kuala Lumpur", "Petaling Jaya", "Shah Alam"];
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
-const INITIAL = {
-  vehicles: [
-    { id: "VH-2401", vin: "WBA7A1100MCE18421", reg: "VCA 4821", brand: "BMW", model: "330i M Sport", year: 2025, condition: "New", mileage: 0, cost: 198000, price: 238800, branch: "Kuala Lumpur", status: "Available", color: "Mineral White", location: "Showroom A" },
-    { id: "VH-2402", vin: "JTDKBRFU0J3591028", reg: "VBD 2190", brand: "Toyota", model: "Corolla Cross Hybrid", year: 2025, condition: "New", mileage: 0, cost: 112000, price: 139800, branch: "Petaling Jaya", status: "Reserved", color: "Platinum White", location: "Showroom B" },
-    { id: "VH-2403", vin: "WVWZZZCD8PW028341", reg: "VCE 7734", brand: "Volkswagen", model: "Golf GTI", year: 2024, condition: "Used", mileage: 12400, cost: 128000, price: 159800, branch: "Kuala Lumpur", status: "Available", color: "Kings Red", location: "Used Car Gallery" },
-    { id: "VH-2404", vin: "MNTCB4D23Z0004281", reg: "VCF 1138", brand: "Nissan", model: "X-Trail e-POWER", year: 2025, condition: "New", mileage: 0, cost: 145000, price: 179800, branch: "Shah Alam", status: "In Transit", color: "Diamond Black", location: "Inbound" },
-    { id: "VH-2405", vin: "MR0HA3CD8P0051432", reg: "VCH 8032", brand: "Toyota", model: "Hilux 2.8 Rogue", year: 2024, condition: "Used", mileage: 18300, cost: 132000, price: 154800, branch: "Petaling Jaya", status: "Under Inspection", color: "Attitude Black", location: "Workshop Bay 2" },
-    { id: "VH-2406", vin: "WBA5R1107KAK77312", reg: "VCA 9902", brand: "BMW", model: "X3 xDrive30i", year: 2025, condition: "New", mileage: 0, cost: 245000, price: 289800, branch: "Kuala Lumpur", status: "Allocated", color: "Phytonic Blue", location: "Delivery Prep" },
-  ],
-  customers: [
-    { id: "CU-1001", name: "Amelia Tan", type: "Individual", email: "amelia.tan@example.com", phone: "+60 12-345 6789", preferred: "BMW", owner: "Daniel Wong", branch: "Kuala Lumpur", spent: 238800, status: "Active" },
-    { id: "CU-1002", name: "Meridian Tech Sdn Bhd", type: "Corporate", email: "procurement@meridiantech.my", phone: "+60 3-7788 2211", preferred: "Toyota", owner: "Sarah Lim", branch: "Petaling Jaya", spent: 419400, status: "Active" },
-    { id: "CU-1003", name: "Marcus Lee", type: "Individual", email: "marcus.lee@example.com", phone: "+60 16-222 9011", preferred: "Volkswagen", owner: "Daniel Wong", branch: "Kuala Lumpur", spent: 159800, status: "Active" },
-    { id: "CU-1004", name: "Pioneer Logistics", type: "Fleet", email: "fleet@pioneerlogistics.my", phone: "+60 3-5521 8200", preferred: "Nissan", owner: "Sarah Lim", branch: "Shah Alam", spent: 0, status: "Prospect" },
-    { id: "CU-1005", name: "Nur Aisyah Rahman", type: "Individual", email: "aisyah.r@example.com", phone: "+60 19-455 3320", preferred: "Toyota", owner: "Kevin Goh", branch: "Petaling Jaya", spent: 154800, status: "Active" },
-  ],
-  sales: [
-    { id: "SO-2026-1042", customer: "Amelia Tan", vehicle: "BMW 330i M Sport", amount: 238800, status: "Delivery Prep", payment: "Deposit Paid", consultant: "Daniel Wong", date: "2026-10-18" },
-    { id: "SO-2026-1041", customer: "Meridian Tech Sdn Bhd", vehicle: "Toyota Corolla Cross Hybrid", amount: 139800, status: "Awaiting Payment", payment: "Pending", consultant: "Sarah Lim", date: "2026-10-17" },
-    { id: "SO-2026-1038", customer: "Marcus Lee", vehicle: "Volkswagen Golf GTI", amount: 159800, status: "Completed", payment: "Paid", consultant: "Daniel Wong", date: "2026-10-14" },
-    { id: "SO-2026-1035", customer: "Pioneer Logistics", vehicle: "Nissan X-Trail e-POWER", amount: 179800, status: "Quotation", payment: "Not Due", consultant: "Kevin Goh", date: "2026-10-12" },
-  ],
-  jobs: [
-    { id: "RO-6218", customer: "Amelia Tan", vehicle: "BMW X3 xDrive30i", service: "1,000 km inspection", technician: "Arif Hassan", status: "In Progress", due: "2026-10-22", branch: "Kuala Lumpur" },
-    { id: "RO-6217", customer: "Marcus Lee", vehicle: "Volkswagen Golf GTI", service: "Brake pad replacement", technician: "Kumar Raj", status: "Waiting for Parts", due: "2026-10-22", branch: "Kuala Lumpur" },
-    { id: "RO-6216", customer: "Nur Aisyah Rahman", vehicle: "Toyota Hilux 2.8 Rogue", service: "Periodic maintenance", technician: "Arif Hassan", status: "Quality Check", due: "2026-10-23", branch: "Petaling Jaya" },
-    { id: "RO-6214", customer: "Meridian Tech Sdn Bhd", vehicle: "Toyota Corolla Cross Hybrid", service: "Hybrid system diagnosis", technician: "Lim Wei Jian", status: "Awaiting Customer Approval", due: "2026-10-21", branch: "Petaling Jaya" },
-  ],
-  parts: [
-    { id: "PT-00921", name: "Oil Filter — 2.0L", sku: "TOY-90915-YZZD3", brand: "Toyota", qty: 42, min: 20, cost: 18, price: 32, location: "A-02-04", supplier: "UMW Parts" },
-    { id: "PT-00922", name: "Front Brake Pad Set", sku: "BMW-341168", brand: "BMW", qty: 8, min: 12, cost: 280, price: 420, location: "B-01-02", supplier: "Euro Auto Supply" },
-    { id: "PT-00923", name: "Cabin Air Filter", sku: "VW-5Q0819653", brand: "Volkswagen", qty: 26, min: 10, cost: 45, price: 75, location: "A-03-01", supplier: "VAG Parts MY" },
-    { id: "PT-00924", name: "Engine Air Filter", sku: "NIS-16546", brand: "Nissan", qty: 4, min: 8, cost: 68, price: 105, location: "C-01-05", supplier: "Tan Chong Parts" },
-    { id: "PT-00925", name: "Synthetic Engine Oil 5W-30", sku: "OIL-5W30-4L", brand: "Multi-brand", qty: 63, min: 24, cost: 95, price: 138, location: "A-01-01", supplier: "PetroPro" },
-  ],
-  warranties: [
-    { id: "WR-1201", customer: "Amelia Tan", vehicle: "BMW 330i M Sport", start: "2025-11-01", expiry: "2028-10-31", coverage: "Manufacturer — 3 years", status: "Active" },
-    { id: "WR-1202", customer: "Marcus Lee", vehicle: "Volkswagen Golf GTI", start: "2024-06-14", expiry: "2027-06-13", coverage: "Manufacturer — 3 years", status: "Active" },
-    { id: "WR-1203", customer: "Meridian Tech Sdn Bhd", vehicle: "Toyota Corolla Cross Hybrid", start: "2023-12-01", expiry: "2026-11-30", coverage: "Hybrid battery + vehicle", status: "Expiring Soon" },
-  ],
-};
 
 const STAGES = ["Enquiry", "Qualification", "Quotation", "Awaiting Approval", "Awaiting Payment", "Delivery Prep", "Completed"];
 
@@ -96,6 +57,10 @@ const damageOwner = (db, key, id) => {
 /* ───────────────────────── Helpers ───────────────────────── */
 const money = (n) => "RM " + Number(n || 0).toLocaleString("en-MY", { maximumFractionDigits: 0 });
 const loadDb = () => { try { return JSON.parse(localStorage.getItem(KEY)) || clone(INITIAL); } catch { return clone(INITIAL); } };
+// the browser keeps a copy of the records; MongoDB (through the API) is the shared source of truth
+const SYNCED = "autocore-db-synced", PENDING = "autocore-db-pending"; // copy has reached MongoDB once / has edits MongoDB hasn't seen
+const flag = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
+const hadCopy = (() => { try { return !!localStorage.getItem(KEY); } catch { return false; } })();
 const matches = (r, q) => Object.values(r).join(" ").toLowerCase().includes(q.toLowerCase());
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 const AV_COLORS = ["#f6b26b", "#8fd6ae", "#a59cff", "#7cb7ff", "#f2939b"];
@@ -245,7 +210,7 @@ function RecordForm({ cfg, type, record, onSave, onCancel, settings, toast }) {
             {damageOpen && <DamageInspector vehicle={{ ...record, ...vals }} value={damage} onChange={setDamage} settings={settings} toast={toast} />}
           </details>
         )}
-        <p className="page-note" style={{ marginTop: 15 }}>Fields marked * are required. Changes are saved in this browser's demo workspace.</p>
+        <p className="page-note" style={{ marginTop: 15 }}>Fields marked * are required. Changes are saved to the database.</p>
       </div>
       <div className="modal-foot">
         <button type="button" className="btn" onClick={onCancel}>Cancel</button>
@@ -754,7 +719,7 @@ function SettingsPage({ toast, resetDemo, settings, setSettings, db, openMedia }
       <section className="card" style={{ marginTop: 14 }}>
         <div className="card-head"><div><h3>Data & environment</h3><p>Demo workspace controls</p></div></div>
         <div className="card-body">
-          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>Records are stored in this browser using local storage. This demo does not include server-side authentication, multi-user synchronization, backups, or backend-enforced role permissions.</p>
+          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>Records are stored in MongoDB through the AutoCore API (<code>npm run dev</code> starts both), with a copy in this browser for when the server can't be reached. Uploaded 360° photos and 3D files stay in this browser. This demo does not include authentication, backups, or backend-enforced role permissions.</p>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="btn" onClick={resetDemo}>Reset sample data</button>
             <button className="btn" onClick={() => window.confirm("Remove all 360° photos and 3D files uploaded in this browser?") && clearAllLocalMedia().then(() => toast("Uploaded media cleared."))}><Icon n="trash" s={14} />Clear uploaded media</button>
@@ -782,7 +747,72 @@ export default function App() {
   const timer = useRef(null);
   const setSettings = (s) => { setSettingsState(s); saveSettings(s); };
 
-  useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {} }, [db]);
+  /* ── MongoDB sync: load once, then send each change (only the records that changed) ── */
+  const [conn, setConn] = useState("connecting"); // connecting | online | offline | error
+  const remote = useRef(null); // what MongoDB holds, as far as this tab knows; null while not connected
+  const queue = useRef(Promise.resolve());
+  const dbRef = useRef(db), loaded = useRef(db);
+  dbRef.current = db;
+
+  const push = () => {
+    queue.current = queue.current.then(async () => {
+      if (!remote.current) return;
+      const target = dbRef.current, changes = diffDb(remote.current, target);
+      try {
+        for (const [name, change] of Object.entries(changes)) {
+          await api.apply(name, change);
+          remote.current = { ...remote.current, [name]: target[name] };
+        }
+        if (dbRef.current === target) flag(PENDING, null);
+        setConn("online");
+      } catch (e) {
+        flag(PENDING, "1");
+        setConn("error");
+        toast(`${e.message} Your changes are kept in this browser and will be sent when the database is back.`);
+      }
+    });
+  };
+  const connect = () => {
+    queue.current = queue.current.then(async () => {
+      setConn("connecting");
+      try {
+        const data = await api.load();
+        remote.current = data;
+        // edits made while offline (or a browser copy from before the database existed) are sent up; otherwise MongoDB wins
+        const carry = flag(PENDING) || (hadCopy && !flag(SYNCED));
+        flag(SYNCED, "1");
+        setConn("online");
+        if (carry && Object.keys(diffDb(data, dbRef.current)).length) { push(); toast("Changes saved in this browser were sent to the database."); }
+        else if (JSON.stringify(data) !== JSON.stringify(dbRef.current)) setDb(data);
+      } catch {
+        remote.current = null;
+        setConn("offline");
+      }
+    });
+  };
+  // pick up other users' changes when coming back to the tab
+  const refresh = () => {
+    queue.current = queue.current.then(async () => {
+      if (!remote.current || Object.keys(diffDb(remote.current, dbRef.current)).length) return;
+      try {
+        const data = await api.load();
+        remote.current = data;
+        if (JSON.stringify(data) !== JSON.stringify(dbRef.current)) setDb(data);
+      } catch { remote.current = null; setConn("offline"); }
+    });
+  };
+
+  useEffect(() => {
+    connect();
+    const onVis = () => document.visibilityState === "visible" && (remote.current ? refresh() : connect());
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
+    if (db === loaded.current) return; // the copy loaded at start-up isn't an edit
+    if (remote.current) push(); else flag(PENDING, "1");
+  }, [db]);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") { setModal(null); setMenuOpen(false); } };
     document.addEventListener("keydown", onKey);
@@ -875,7 +905,7 @@ export default function App() {
   };
 
   const resetDemo = () => {
-    if (!window.confirm("Reset all locally saved records to the original sample data?")) return;
+    if (!window.confirm(`Reset all records${conn === "online" ? " in the database (for every user)" : ""} to the original sample data?`)) return;
     setDb(clone(INITIAL));
     toast("Sample data reset.");
   };
@@ -913,6 +943,10 @@ export default function App() {
           <div className="crumb">Workspace&nbsp; / &nbsp;<span>{TITLES[page]}</span></div>
           <div className="top-search"><span className="si"><Icon n="search" s={14} /></span><input value={globalQ} onChange={(e) => setGlobalQ(e.target.value)} onKeyDown={globalSearch} placeholder="Search here" aria-label="Global search" /></div>
           <div className="top-actions">
+            <button className={`db-chip ${conn}`} onClick={conn === "online" ? refresh : connect} disabled={conn === "connecting"}
+              title={{ online: "Records are saved in MongoDB. Click to reload.", connecting: "Connecting to the database…", offline: "The database server isn't reachable. Changes are kept in this browser. Click to retry.", error: "The last change couldn't be saved to MongoDB. Click to retry." }[conn]}>
+              <i />{{ online: "MongoDB", connecting: "Connecting…", offline: "Offline", error: "Not saved" }[conn]}
+            </button>
             <button className="icon-btn hide-sm" title="Administration" onClick={() => go("settings")}><Icon n="settings" s={16} /></button>
             <button className="icon-btn" title="Notifications" onClick={() => toast("You have 4 operational alerts. See Operational Alerts on the dashboard.")}><Icon n="bell" s={16} /><i className="dot" /></button>
             <div className="avatar">JL</div><div className="user">Jordan Lee<small>Dealer Principal</small></div>
