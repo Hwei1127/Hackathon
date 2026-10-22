@@ -34,6 +34,10 @@ a vehicle's AI identification and damage map are stored on the vehicle document.
 API: `GET /api/health`, `GET /api/db` (everything), `GET /api/:collection`, `GET /api/:collection/:id`,
 `PATCH /api/:collection` with `{ upsert: [records], delete: [ids], order: [ids] }`.
 
+Vehicle media (uploaded 3D models and 360° photos) is stored in MongoDB GridFS (`media.files` / `media.chunks`), tagged with the vehicle's stock ID:
+`GET /api/media/:stockId` (what is stored), `GET /api/media/file/:fileId` (the file), `PUT /api/media/:stockId/glb`, `PUT /api/media/:stockId/frames/:index`,
+`DELETE /api/media/:stockId/glb`, `DELETE /api/media/:stockId/frames`, `POST /api/media/:stockId/move` with `{ to }`, `DELETE /api/media` (everything). Uploads are limited to 100 MB per file.
+
 Run the parts separately with `npm run server` and `npm run web`.
 
 ## Build for production
@@ -57,7 +61,7 @@ Every vehicle shows the best imagery available, falling back automatically:
 | 3 | **IMAGIN.studio renders** | Photo-realistic render of the exact make, model, year and colour | Add your customer key in **Administration → Vehicle imagery** |
 | 4 | **Illustration** | Sedan / SUV / hatchback / pickup / MPV / coupe picked from the model name | Automatic (override with *Body Type* on the vehicle) |
 
-- **Uploads** are stored in the browser (IndexedDB), so they only appear on that device. Photos are resized to 1600px on upload.
+- **Uploads** are saved in the database (MongoDB GridFS), so every user and device loads the same 3D model and photos for a vehicle. If the database can't be reached, they wait in the browser (IndexedDB) and upload automatically once it can. Photos are resized to 1600px on upload.
 - **Hosted files** in `public/media/<Stock ID>/` are shared with everyone once deployed. See `public/media/README.md`. A pattern like `/media/VH-2401/{01..36}.jpg` expands to 36 URLs.
 - **IMAGIN.studio** is a paid service; request a customer key at imagin.studio. The app guesses each vehicle's model family from its name (e.g. *330i M Sport → 3-series*, *Corolla Cross Hybrid → corolla-cross*); if a render looks wrong, set *Model family for renders* in that vehicle's 360° panel. The angle codes used for the spin are set in Administration and depend on your IMAGIN plan.
 - **3D models** are displayed with Google's `<model-viewer>`, loaded only when a vehicle has a .glb. Only use models you're licensed to use commercially (e.g. purchased from Sketchfab/TurboSquid or supplied by the brand).
@@ -104,7 +108,8 @@ autocore-dms/
     │   ├── CarArt.jsx              # body-type illustrations
     │   └── Icon.jsx                # icon set
     └── lib/
-        ├── vehicleMedia.js         # body type, IMAGIN URLs, IndexedDB storage
+        ├── vehicleMedia.js         # body type, IMAGIN URLs, browser (IndexedDB) storage
+        ├── mediaStore.js           # vehicle media in the database, with the browser as fallback
         ├── api.js                  # API client + change diffing
         ├── damage.js               # damage parts, severities, offline text reader
         ├── carAI.js                # local-AI vehicle identification and damage assessment
@@ -113,8 +118,7 @@ autocore-dms/
 
 ## Notes
 
-- Uploaded 360° media can be removed in **Administration → Clear uploaded media**.
+- Uploaded 3D models and 360° photos can be removed for everyone in **Administration → Clear uploaded media**.
 - Records live in MongoDB, with a copy in the browser's localStorage (key `autocore-db-v1`). **Administration → Reset sample data** restores the defaults in the database too.
-- Uploaded 360° photos and 3D files are still stored in each browser (IndexedDB), not in MongoDB.
 - There is no login or role enforcement on the API; don't expose it beyond your own machine or network.
 - The Sora font loads from Google Fonts; without internet the app falls back to the system font.

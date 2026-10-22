@@ -121,6 +121,10 @@ export async function setLocalMedia(id, patch) {
   await tx("readwrite", (s) => s.put({ ...cur, ...patch, updated: Date.now() }, id));
   changed(id);
 }
+/** stock IDs that have files kept in this browser */
+export async function localMediaIds() {
+  try { return (await tx("readonly", (s) => s.getAllKeys())) || []; } catch { return []; }
+}
 export async function clearAllLocalMedia() {
   try { await tx("readwrite", (s) => s.clear()); changed("*"); } catch {}
 }

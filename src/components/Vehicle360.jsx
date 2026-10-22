@@ -1,27 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import CarArt from "./CarArt.jsx";
 import Icon from "./Icon.jsx";
-import { bodyTypeOf, expandFrames, getLocalMedia, imaginFrames, mediaEvents } from "../lib/vehicleMedia.js";
+import { bodyTypeOf, expandFrames, imaginFrames, mediaEvents } from "../lib/vehicleMedia.js";
+import { getMedia } from "../lib/mediaStore.js";
 import { carGlbUrl, specKey } from "../lib/car3d.js";
 
-/* Loads the photos / 3D file uploaded for a vehicle in this browser (IndexedDB) as object URLs. */
-export function useLocalMedia(id) {
-  const [media, setMedia] = useState({ frames: [], glb: null, glbName: "", count: 0 });
+/* Loads the photos / 3D file uploaded for a vehicle: from the database (URLs), or files still waiting in this browser (object URLs).
+   → { frames: url[], glb: url | null, glbName, glbSize, framesSize, where: "database" | "browser" } */
+export function useVehicleMedia(id) {
+  const [media, setMedia] = useState({ frames: [], glb: null, glbName: "", glbSize: 0, framesSize: 0, where: "database" });
   useEffect(() => {
-    let urls = [], alive = true;
+    let urls = [], alive = true, tries = 0, retry;
     const load = async () => {
-      const m = await getLocalMedia(id);
+      if (!id) return;
+      clearTimeout(retry);
+      const m = await getMedia(id);
       if (!alive) return;
+      // the database didn't answer: try again a few times before settling for what this browser has
+      if (m.offline && tries++ < 3) retry = setTimeout(load, 4000 * tries);
       urls.forEach(URL.revokeObjectURL);
-      const frames = (m.frames || []).map((b) => URL.createObjectURL(b));
-      const glb = m.glb ? URL.createObjectURL(m.glb) : null;
-      urls = [...frames, ...(glb ? [glb] : [])];
-      setMedia({ frames, glb, glbName: m.glb?.name || "", glbSize: m.glb?.size || 0, framesSize: (m.frames || []).reduce((a, b) => a + b.size, 0) });
+      urls = [];
+      const toUrl = (x) => (x instanceof Blob ? (urls.push(URL.createObjectURL(x)), urls[urls.length - 1]) : x.url);
+      const frames = m.frames.map(toUrl);
+      const glb = m.glb ? toUrl(m.glb) : null;
+      setMedia({ frames, glb, glbName: m.glb?.name || "", glbSize: m.glb?.size || 0, framesSize: m.frames.reduce((a, b) => a + (b.size || 0), 0), where: m.where });
     };
     load();
     const onChange = (e) => (e.detail === id || e.detail === "*") && load();
     mediaEvents.addEventListener("change", onChange);
-    return () => { alive = false; mediaEvents.removeEventListener("change", onChange); urls.forEach(URL.revokeObjectURL); };
+    return () => { alive = false; clearTimeout(retry); mediaEvents.removeEventListener("change", onChange); urls.forEach(URL.revokeObjectURL); };
   }, [id]);
   return media;
 }
@@ -124,7 +131,7 @@ export function ModelBox({ src, auto, onFail, label, orbit = "35deg 75deg auto" 
  * media: optional { frames, glb } object URLs shown instead of what is stored for v.id (unsaved uploads)
  */
 export default function Vehicle360({ vehicle: v, settings, variant = "hero", onManage, media }) {
-  const stored = useLocalMedia(v.id);
+  const stored = useVehicleMedia(v.id);
   const local = media || stored;
   const hosted = useMemo(() => expandFrames(v.framesUrl || ""), [v.framesUrl]);
   const renders = useMemo(() => imaginFrames(v, settings), [v.brand, v.model, v.year, v.color, v.imaginModel, settings?.imaginKey, settings?.imaginAngles]);

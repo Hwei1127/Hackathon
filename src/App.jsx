@@ -14,7 +14,8 @@ import { INITIAL } from "./data/seed.js";
 import { api, diffDb } from "./lib/api.js";
 import { BODY_LABEL, estimateSpec } from "./lib/carAI.js";
 import { damageGlbUrl, specKey } from "./lib/car3d.js";
-import { BODY_TYPES, bodyTypeOf, loadSettings, saveSettings, clearAllLocalMedia, getLocalMedia, setLocalMedia } from "./lib/vehicleMedia.js";
+import { BODY_TYPES, bodyTypeOf, loadSettings, saveSettings } from "./lib/vehicleMedia.js";
+import { setMedia, moveMedia, clearAllMedia, syncLocalMedia, reloadMedia } from "./lib/mediaStore.js";
 
 /* ───────────────────────── Data ───────────────────────── */
 const KEY = "autocore-db-v1";
@@ -1119,7 +1120,7 @@ function SettingsPage({ toast, resetDemo, settings, setSettings, db, openMedia }
           <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>Records are stored in MongoDB through the AutoCore API (<code>npm run dev</code> starts both), with a copy in this browser for when the server can't be reached. Uploaded 360° photos and 3D files stay in this browser. This demo does not include authentication, backups, or backend-enforced role permissions.</p>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="btn" onClick={resetDemo}>Reset sample data</button>
-            <button className="btn" onClick={() => window.confirm("Remove all 360° photos and 3D files uploaded in this browser?") && clearAllLocalMedia().then(() => toast("Uploaded media cleared."))}><Icon n="trash" s={14} />Clear uploaded media</button>
+            <button className="btn" onClick={() => window.confirm("Remove every uploaded 360° photo and 3D model, for all vehicles and all users? This can't be undone.") && clearAllMedia().then(() => toast("Uploaded media cleared."))}><Icon n="trash" s={14} />Clear uploaded media</button>
           </div>
         </div>
       </section>
@@ -1264,6 +1265,11 @@ export default function App() {
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
+  // once the database is reachable, upload any 360° photos / 3D files that were kept in this browser
+  useEffect(() => {
+    if (conn !== "online") return;
+    syncLocalMedia().then((n) => n && toast(`Uploaded the 360° photos / 3D files of ${plural(n, "vehicle")} to the database.`)).catch(() => {}).finally(reloadMedia);
+  }, [conn]);
   useEffect(() => {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
     if (db === loaded.current) return; // the copy loaded at start-up isn't an edit
@@ -1313,12 +1319,11 @@ export default function App() {
 
   // uploads from the vehicle form are stored under the (possibly renamed) Stock ID once the record is accepted
   const storeFormMedia = async (oldId, id, pending) => {
-    const moved = oldId && oldId !== id ? await getLocalMedia(oldId) : null;
-    if (!moved && !Object.keys(pending).length) return;
     try {
-      await setLocalMedia(id, { ...(moved && { frames: moved.frames, glb: moved.glb }), ...pending });
-      if (moved) await setLocalMedia(oldId, { frames: [], glb: null });
-    } catch { toast("Couldn't save the 360° photos / 3D file in this browser (storage may be full)."); }
+      if (oldId && oldId !== id) await moveMedia(oldId, id);
+      if (!Object.keys(pending).length) return;
+      if ((await setMedia(id, pending)) === "browser") toast("The database can't be reached: the 360° photos / 3D file are kept in this browser and will upload when it's back.");
+    } catch { toast("Couldn't save the 360° photos / 3D file (browser storage may be full)."); }
   };
 
   const saveRecord = (data, media) => {

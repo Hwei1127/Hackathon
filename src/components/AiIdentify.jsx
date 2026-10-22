@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Icon from "./Icon.jsx";
-import { useLocalMedia } from "./Vehicle360.jsx";
+import { useVehicleMedia } from "./Vehicle360.jsx";
 import { BODY_LABEL, estimateSpec, identifyVehicle } from "../lib/carAI.js";
 
 // vehicles currently being identified or that already failed this session (stops auto-runs looping)
@@ -14,7 +14,7 @@ const fmtMm = (n) => Number(n).toLocaleString("en-MY");
  * "Scan photo" identifies a car from a picture and checks it against the record.
  */
 export default function AiIdentify({ vehicle: v, settings, onSaveAi, toast, goSettings }) {
-  const local = useLocalMedia(v.id);
+  const local = useVehicleMedia(v.id);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const file = useRef(null);

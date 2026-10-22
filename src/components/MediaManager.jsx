@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import Icon from "./Icon.jsx";
-import Vehicle360, { useLocalMedia } from "./Vehicle360.jsx";
-import { BODY_TYPES, bodyTypeOf, expandFrames, fmtBytes, guessModelFamily, setLocalMedia, sortFiles } from "../lib/vehicleMedia.js";
+import Vehicle360, { useVehicleMedia } from "./Vehicle360.jsx";
+import { BODY_TYPES, bodyTypeOf, expandFrames, fmtBytes, guessModelFamily, sortFiles } from "../lib/vehicleMedia.js";
+import { setMedia } from "../lib/mediaStore.js";
 
 /* Shrink photos before storing them (max 1600px wide, JPEG) so 36 frames stay a few MB. */
 async function shrink(file, max = 1600) {
@@ -67,7 +68,9 @@ export function MediaFields({ id, model, info, form, set, onPhotos, onModel, onR
           hint="Full 3D orbit with zoom, and AR on supported phones. Use a model you're licensed to use." />
         {info.glbName && <button type="button" className="mini-btn danger" onClick={onRemoveModel}><Icon n="trash" s={12} />Remove 3D model</button>}
       </div>
-      <p className="page-note" style={{ marginTop: -4 }}>Uploads are stored in this browser only. To share them with every user, host the files and link them below.</p>
+      <p className="page-note" style={{ marginTop: -4 }}>{info.where === "browser" && (info.frames > 0 || info.glbName)
+        ? <><b>Waiting to upload:</b> the database can't be reached, so these files are kept in this browser for now. They upload automatically when it's back.</>
+        : <>Uploads are saved to the database, so every user and device loads the same files for this vehicle.</>}</p>
 
       <div className="media-sec">
         <div className="media-h"><Icon n="link" s={15} /><b>Hosted files</b><span className="muted" style={{ fontSize: 10 }}>visible to everyone</span></div>
@@ -94,7 +97,7 @@ export function MediaFields({ id, model, info, form, set, onPhotos, onModel, onR
 /* 360° / 3D section of the Add / Edit vehicle form. Uploads wait in `value.pending` until the record is saved:
    { frames?: File[], glb?: File|null } — a missing key keeps what is stored, an empty value removes it. */
 export function VehicleMediaForm({ vehicle, storedId, value, onChange, settings, toast }) {
-  const stored = useLocalMedia(storedId ?? "");
+  const stored = useVehicleMedia(storedId ?? "");
   const [busy, setBusy] = useState("");
   const [urls, setUrls] = useState({});
   const { pending, form } = value;
@@ -138,28 +141,29 @@ export function VehicleMediaForm({ vehicle, storedId, value, onChange, settings,
 }
 
 export default function MediaManager({ vehicle: v, settings, onSave, onClose, toast, goSettings }) {
-  const local = useLocalMedia(v.id);
+  const local = useVehicleMedia(v.id);
   const [busy, setBusy] = useState("");
   const [form, setForm] = useState({ glbUrl: v.glbUrl || "", framesUrl: v.framesUrl || "", imaginModel: v.imaginModel || "", body: v.body || "Auto" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const preview = { ...v, ...form };
-  const info = { frames: local.frames.length, framesSize: local.framesSize, ...(local.glb ? { glbName: local.glbName || "model.glb", glbSize: local.glbSize } : {}) };
+  const info = { where: local.where, frames: local.frames.length, framesSize: local.framesSize,...(local.glb ? { glbName: local.glbName || "model.glb", glbSize: local.glbSize } : {}) };
 
-  const addPhotos = async (files) => {
+  // saved to the database; if it can't be reached the files wait in this browser and upload later
+  const save = async (patch, busyText, done) => {
+    setBusy(busyText);
     try {
-      const frames = await preparePhotos(files, toast, setBusy);
-      if (!frames) return;
-      await setLocalMedia(v.id, { frames });
-      toast(`${frames.length} photos saved for ${v.id}.${frames.length < 8 ? " Use 12 or more for a smooth spin." : ""}`);
-    } catch { toast("Couldn't save the photos in this browser (storage may be full)."); }
+      const where = await setMedia(v.id, patch);
+      toast(where === "database" ? done : `${done.replace(/\.$/, "")} in this browser for now. It will upload to the database when it's reachable.`);
+    } catch { toast("Couldn't save the files (browser storage may be full)."); }
+    finally { setBusy(""); }
+  };
+  const addPhotos = async (files) => {
+    const frames = await preparePhotos(files, toast, setBusy).catch(() => null);
+    if (frames) await save({ frames }, `Uploading ${frames.length} photos…`, `${frames.length} photos saved for ${v.id}.${frames.length < 8 ? " Use 12 or more for a smooth spin." : ""}`);
   };
   const addModel = async (files) => {
     const f = pickGlb(files, toast);
-    if (!f) return;
-    setBusy("Saving 3D model…");
-    try { await setLocalMedia(v.id, { glb: f }); toast(`3D model saved for ${v.id}.`); }
-    catch { toast("Couldn't save the 3D file in this browser (storage may be full)."); }
-    setBusy("");
+    if (f) await save({ glb: f }, "Uploading 3D model…", `3D model saved for ${v.id}.`);
   };
 
   return (
@@ -171,8 +175,8 @@ export default function MediaManager({ vehicle: v, settings, onSave, onClose, to
         </p>
         <MediaFields id={v.id} model={v.model} info={info} form={form} set={set} settings={settings} goSettings={goSettings}
           guess={guessModelFamily(v.brand, v.model)} onPhotos={addPhotos} onModel={addModel}
-          onRemovePhotos={() => setLocalMedia(v.id, { frames: [] }).then(() => toast("Photos removed."))}
-          onRemoveModel={() => setLocalMedia(v.id, { glb: null }).then(() => toast("3D model removed."))} />
+          onRemovePhotos={() => save({ frames: [] }, "Removing photos…", "Photos removed.")}
+          onRemoveModel={() => save({ glb: null }, "Removing 3D model…", "3D model removed.")} />
       </div>
       <div className="modal-foot">
         {busy && <span className="muted" style={{ marginRight: "auto", fontSize: 12 }}>{busy}</span>}
