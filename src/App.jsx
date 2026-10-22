@@ -69,8 +69,12 @@ const SYNCED = "autocore-db-synced", PENDING = "autocore-db-pending"; // copy ha
 const flag = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
 const hadCopy = (() => { try { return !!localStorage.getItem(KEY); } catch { return false; } })();
 const matches = (r, q) => Object.values(r).join(" ").toLowerCase().includes(q.toLowerCase());
-// a module table's filters: search text, status, branch, and (parts) below minimum stock
-const passes = (r, f) => matches(r, f.search) && (!f.status || r.status === f.status) && (f.branch === "All branches" || r.branch === f.branch) && (!f.low || r.qty < r.min);
+// a part's stock level: out (none left), low (below its minimum), ok
+const stockLevel = (p) => (p.qty <= 0 ? "out" : p.qty < p.min ? "low" : "ok");
+const STOCK_FILTER = { reorder: (p) => stockLevel(p) !== "ok", low: (p) => stockLevel(p) === "low", out: (p) => stockLevel(p) === "out", ok: (p) => stockLevel(p) === "ok" };
+// a module table's filters: search text, status, branch, and (parts) stock level, brand and supplier
+const passes = (r, f) => matches(r, f.search) && (!f.status || r.status === f.status) && (f.branch === "All branches" || r.branch === f.branch)
+  && (!f.stock || STOCK_FILTER[f.stock](r)) && (!f.brand || r.brand === f.brand) && (!f.supplier || r.supplier === f.supplier);
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 const AV_COLORS = ["#f6b26b", "#8fd6ae", "#a59cff", "#7cb7ff", "#f2939b"];
 
@@ -78,7 +82,7 @@ function statusClass(s) {
   let cls = "s-gray";
   if (/Available|Active|Completed|Paid|Approved|Ready for Collection/.test(s)) cls = "s-green";
   if (/Reserved|Allocated|Awaiting|Inspection|Transit|Quotation|Deposit|Quality|Expiring|Pending/.test(s)) cls = "s-amber";
-  if (/Overdue|Rejected|Waiting for Parts|Cancelled|Low Stock/.test(s)) cls = "s-red";
+  if (/Overdue|Rejected|Waiting for Parts|Cancelled|Low Stock|Out of Stock/.test(s)) cls = "s-red";
   if (/Delivery Prep|In Progress|Checked In/.test(s)) cls = "s-blue";
   return cls;
 }
@@ -120,7 +124,15 @@ const CELLS = {
   },
   parts: {
     Part: (r) => <Primary a={r.name} b={r.sku} />, Brand: (r) => r.brand,
-    Quantity: (r) => <><b>{r.qty}</b> {r.qty < r.min && <Badge s="Low Stock" />}<span className="sub-cell">Min: {r.min}</span></>,
+    Quantity: (r) => {
+      const level = stockLevel(r);
+      return (
+        <div className="qty-cell" title={`${r.qty} in stock, minimum ${r.min}`}>
+          <div className="qty-top"><b>{r.qty}</b><span className="qty-min">/ min {r.min}</span>{level !== "ok" && <Badge s={level === "out" ? "Out of Stock" : "Low Stock"} />}</div>
+          <div className={`qty-bar ${level}`}><i style={{ width: `${Math.min(100, r.min ? (r.qty / (r.min * 2)) * 100 : 100)}%` }} /></div>
+        </div>
+      );
+    },
     "Unit Cost": (r) => money(r.cost), "Selling Price": (r) => money(r.price), Location: (r) => r.location, "Stock Value": (r) => money(r.qty * r.cost),
   },
   warranties: {
@@ -136,8 +148,8 @@ const PageHead = ({ page, title, desc, children }) => (
     <div className="head-actions">{children}</div>
   </div>
 );
-const Kpi = ({ label, value, icon, foot }) => (
-  <div className="card kpi">
+const Kpi = ({ label, value, icon, foot, onClick, active }) => (
+  <div className={`card kpi${onClick ? " kpi-btn" : ""}${active ? " on" : ""}`} onClick={onClick} role={onClick ? "button" : undefined} tabIndex={onClick ? 0 : undefined} aria-pressed={onClick ? !!active : undefined} onKeyDown={onClick ? (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onClick()) : undefined}>
     <div className="kpi-top">{label}<span className="kpi-icon"><Icon n={icon} s={16} /></span></div>
     <div className="kpi-value">{value}</div><div className="kpi-foot">{foot}</div>
   </div>
@@ -154,6 +166,9 @@ const Bars = ({ items }) => (
 );
 const Delta = ({ v, down }) => <span className={`pill ${down ? "r" : "g"}`}>{down ? "↓" : "↑"} {v}</span>;
 
+// money columns line up on the right
+const NUM_COLS = new Set(["Unit Cost", "Selling Price", "Stock Value", "Amount", "Lifetime Value"]);
+
 // a completed repair order is closed: no more edits or damage changes, only its report
 const isClosedJob = (type, r) => type === "jobs" && r?.status === "Completed";
 
@@ -162,11 +177,11 @@ function DataTable({ rows, cols, type, onAction, compact }) {
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr>{cols.map((c) => <th key={c}>{c}</th>)}{!compact && <th>Action</th>}</tr></thead>
+        <thead><tr>{cols.map((c) => <th key={c} className={NUM_COLS.has(c) ? "num" : undefined}>{c}</th>)}{!compact && <th>Action</th>}</tr></thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.id} onClick={compact ? () => onAction("view", type, r.id) : undefined} style={compact ? { cursor: "pointer" } : undefined}>
-              {cols.map((c) => <td key={c}>{CELLS[type]?.[c] ? CELLS[type][c](r) : r[c.toLowerCase()] ?? "—"}</td>)}
+              {cols.map((c) => <td key={c} className={NUM_COLS.has(c) ? "num" : undefined}>{CELLS[type]?.[c] ? CELLS[type][c](r) : r[c.toLowerCase()] ?? "—"}</td>)}
               {!compact && <td><div className="table-actions">
                 <button className="mini-btn" onClick={() => onAction("view", type, r.id)}>View</button>
                 {isClosedJob(type, r) ? (
@@ -826,13 +841,27 @@ function Dashboard({ db, go, onAction, openForm, downloadCsv, toast, settings, o
 }
 
 /* ───────────────────────── Module pages ───────────────────────── */
+function Pager({ page, perPage, total, setPage, noun = "record" }) {
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  return (
+    <>
+      <span>Showing {total ? (page - 1) * perPage + 1 : 0}–{Math.min(page * perPage, total)} of {plural(total, noun)}</span>
+      <div className="pagination">
+        <button disabled={page === 1} onClick={() => setPage(Math.max(1, page - 1))} aria-label="Previous page">←</button>
+        {Array.from({ length: pages }, (_, k) => <button key={k} className={page === k + 1 ? "cur" : ""} aria-current={page === k + 1 ? "page" : undefined} onClick={() => setPage(k + 1)}>{k + 1}</button>)}
+        <button disabled={page >= pages} onClick={() => setPage(page + 1)} aria-label="Next page">→</button>
+      </div>
+    </>
+  );
+}
+
 function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMode, setViewMode, onAction, openForm, exportCurrent, settings, openMedia }) {
-  const c = CONFIG[page], pageSize = 6, rows = db[c.key];
+  const c = CONFIG[page], pageSize = page === "parts" ? 10 : 6, rows = db[c.key];
   const filtered = rows.filter((r) => passes(r, filters));
   const slice = filtered.slice((pageNum - 1) * pageSize, pageNum * pageSize);
   const statuses = page === "inventory" ? CONFIG.inventory.fields.find((f) => f[0] === "status")[3] : [...new Set(rows.map((r) => r.status))].filter(Boolean);
   const setF = (patch) => { setFilters((f) => ({ ...f, ...patch })); setPageNum(1); };
-  const placeholder = page === "inventory" ? "VIN, model, stock ID…" : page === "customers" ? "name, email, customer ID…" : "records…";
+  const placeholder = { inventory: "VIN, model, stock ID…", customers: "name, email, customer ID…", parts: "part name, part number, location…" }[page] || "records…";
   const search = (
     <div className="table-search"><span className="si"><Icon n="search" s={14} /></span><input placeholder={`Search ${placeholder}`} value={filters.search} onChange={(e) => setF({ search: e.target.value })} /></div>
   );
@@ -840,6 +869,23 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
     <select className="select filter-select" value={filters.status} onChange={(e) => setF({ status: e.target.value })}>
       <option value="">All statuses</option>{statuses.map((x) => <option key={x}>{x}</option>)}
     </select>
+  );
+  // parts: stock level, brand and supplier (parts have no status and aren't kept per branch)
+  const options = (key) => [...new Set(rows.map((r) => r[key]).filter(Boolean))].sort().map((v) => [v, rows.filter((r) => r[key] === v).length]);
+  const partFilters = page === "parts" && !!(filters.search || filters.stock || filters.brand || filters.supplier);
+  const partSels = page === "parts" && (
+    <>
+      <select className={`select filter-select${filters.stock ? " active" : ""}`} value={filters.stock} onChange={(e) => setF({ stock: e.target.value })} aria-label="Stock level">
+        <option value="">All stock levels</option>
+        {[["reorder", "Needs reorder"], ["low", "Below minimum"], ["out", "Out of stock"], ["ok", "In stock"]].map(([k, label]) => <option key={k} value={k}>{label} ({rows.filter(STOCK_FILTER[k]).length})</option>)}
+      </select>
+      <select className={`select filter-select${filters.brand ? " active" : ""}`} value={filters.brand} onChange={(e) => setF({ brand: e.target.value })} aria-label="Brand">
+        <option value="">All brands</option>{options("brand").map(([v, n]) => <option key={v} value={v}>{v} ({n})</option>)}
+      </select>
+      <select className={`select filter-select${filters.supplier ? " active" : ""}`} value={filters.supplier} onChange={(e) => setF({ supplier: e.target.value })} aria-label="Supplier">
+        <option value="">All suppliers</option>{options("supplier").map(([v, n]) => <option key={v} value={v}>{v} ({n})</option>)}
+      </select>
+    </>
   );
   const branchSel = (
     <select className="select filter-select" value={filters.branch} onChange={(e) => setF({ branch: e.target.value })}>
@@ -874,12 +920,7 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
           </div>
         ) : <div className="card"><div className="empty"><Icon n="search" s={22} /><b>No vehicles found</b>Try adjusting your search or filters.</div></div>}
         <div className="card-foot">
-          <span>Showing {filtered.length ? (pageNum - 1) * perPage + 1 : 0}–{Math.min(pageNum * perPage, filtered.length)} of {plural(filtered.length, "vehicle")}</span>
-          <div className="pagination">
-            <button disabled={pageNum === 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))} aria-label="Previous page">←</button>
-            {Array.from({ length: Math.max(1, Math.ceil(filtered.length / perPage)) }, (_, k) => <button key={k} className={pageNum === k + 1 ? "cur" : ""} onClick={() => setPageNum(k + 1)}>{k + 1}</button>)}
-            <button disabled={pageNum * perPage >= filtered.length} onClick={() => setPageNum((n) => n + 1)} aria-label="Next page">→</button>
-          </div>
+          <Pager page={pageNum} perPage={perPage} total={filtered.length} setPage={setPageNum} noun="vehicle" />
         </div>
       </>
     );
@@ -893,15 +934,16 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
       </PageHead>
       {page === "parts" && (
         <div className="grid module-summary">
-          <Kpi label="Total SKUs" value={db.parts.length} icon="box" foot="Across all branches" />
-          <Kpi label="Low Stock Items" value={db.parts.filter((x) => x.qty < x.min).length} icon="alert" foot="Replenishment recommended" />
-          <Kpi label="Stock Valuation" value={money(db.parts.reduce((a, x) => a + x.qty * x.cost, 0))} icon="wallet" foot="At weighted unit cost" />
+          <Kpi label="Total SKUs" value={db.parts.length} icon="box" foot={`${new Set(db.parts.map((x) => x.supplier)).size} suppliers · shared by all branches`} onClick={() => setFilters({ ...NO_FILTERS })} active={!partFilters} />
+          <Kpi label="Needs Reorder" value={db.parts.filter(STOCK_FILTER.reorder).length} icon="alert" foot={`${db.parts.filter(STOCK_FILTER.out).length} out of stock · ${db.parts.filter(STOCK_FILTER.low).length} below minimum`} onClick={() => setF({ stock: filters.stock === "reorder" ? "" : "reorder" })} active={filters.stock === "reorder"} />
+          <Kpi label="Stock Valuation" value={money(db.parts.reduce((a, x) => a + x.qty * x.cost, 0))} icon="wallet" foot={partFilters ? `${money(filtered.reduce((a, x) => a + x.qty * x.cost, 0))} in the filtered parts` : "At unit cost"} />
         </div>
       )}
       <section className="card table-card">
         <div className="table-toolbar">
-          {search}{statusSel}{branchSel}
-          {filters.low && <button className="filter-chip" onClick={() => setF({ low: false })} aria-label="Remove low stock filter">Low stock only <span aria-hidden="true">×</span></button>}
+          {search}
+          {page === "parts" ? partSels : <>{statusSel}{branchSel}</>}
+          {page === "parts" && partFilters && <button className="link-btn clear-filters" onClick={() => setF({ search: "", stock: "", brand: "", supplier: "" })}>Clear filters</button>}
           {page === "inventory" && (
             <div className="view-toggle" role="group" aria-label="Layout">
               <button aria-pressed="false" title="Card view" onClick={() => { setViewMode("cards"); setPageNum(1); }}><Icon n="dashboard" s={14} /></button>
@@ -911,12 +953,7 @@ function ModulePage({ page, db, filters, setFilters, pageNum, setPageNum, viewMo
         </div>
         <DataTable rows={slice} cols={c.cols} type={c.key} onAction={onAction} />
         <div className="table-foot">
-          <span>Showing {filtered.length ? (pageNum - 1) * pageSize + 1 : 0}–{Math.min(pageNum * pageSize, filtered.length)} of {filtered.length} records</span>
-          <div className="pagination">
-            <button disabled={pageNum === 1} onClick={() => setPageNum((n) => Math.max(1, n - 1))} aria-label="Previous page">←</button>
-            <button className="cur" disabled>{pageNum}</button>
-            <button disabled={pageNum * pageSize >= filtered.length} onClick={() => setPageNum((n) => n + 1)} aria-label="Next page">→</button>
-          </div>
+          <Pager page={pageNum} perPage={pageSize} total={filtered.length} setPage={setPageNum} noun={page === "parts" ? "part" : "record"} />
         </div>
       </section>
     </>
@@ -1139,7 +1176,7 @@ function buildSearchIndex({ db, go, openForm, onAction, downloadCsv, resetDemo, 
       out.push({ id: `list-${p}-${b}`, group: "Lists", icon: "pin", title: `${noun} in ${b}`, sub: `${plural(count((r) => r.branch === b), "record")} in ${c.title}`, keys: `list branch filter ${c.title}`, kind: "List", run: () => go(p, "", { branch: b }) }));
   });
   const low = db.parts.filter((x) => x.qty < x.min);
-  if (low.length) out.push({ id: "list-low", group: "Lists", icon: "alert", title: "Parts · Low stock", sub: low.map((x) => x.name).join(", "), keys: "list low stock below minimum reorder replenish", kind: "List", run: () => go("parts", "", { low: true }) });
+  if (low.length) out.push({ id: "list-low", group: "Lists", icon: "alert", title: "Parts · Low stock", sub: low.map((x) => x.name).join(", "), keys: "list low stock below minimum reorder replenish", kind: "List", run: () => go("parts", "", { stock: "reorder" }) });
 
   RECORD_GROUPS.forEach(([key, group, icon, title, sub]) => db[key].forEach((r) =>
     out.push({ id: `${key}-${r.id}`, group, icon, title: title(r), sub: sub(r), keys: Object.values(r).filter((v) => v != null && typeof v !== "object").join(" "), kind: "Open", run: () => onAction("view", key, r.id) })));
@@ -1147,7 +1184,7 @@ function buildSearchIndex({ db, go, openForm, onAction, downloadCsv, resetDemo, 
 }
 
 /* ───────────────────────── App ───────────────────────── */
-const NO_FILTERS = { search: "", status: "", branch: "All branches", low: false };
+const NO_FILTERS = { search: "", status: "", branch: "All branches", stock: "", brand: "", supplier: "" };
 
 export default function App() {
   const [db, setDb] = useState(loadDb);
